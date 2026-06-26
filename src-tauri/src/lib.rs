@@ -53,8 +53,6 @@ pub fn run() {
             subs::enumerate_playlist,
             subs::remote_title,
             subs::list_audio_sources,
-            subs::start_loopback_transcription,
-            subs::stop_loopback_transcription,
             subs::arm_audio_source,
             subs::disarm_audio_source,
             subs::start_external_transcription,

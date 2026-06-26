@@ -229,17 +229,8 @@ pub fn min_silence_to_window(ms: i64) -> f64 {
     (ms as f64 / 1000.0).max(0.05)
 }
 
-pub struct LoopbackParams {
-    pub device_id: Option<String>,
-    pub model: String,
-    pub source_lang: String, // §4.7 必為 concrete ISO（前端保證）
-    pub prompt: String,          // 靜態繁/簡 steering（§3.1；langToWhisper 的 p，空字串=無）
-    pub vad_threshold: f64,    // 靈敏度滑桿 → RMS 門檻（映射）
-    pub vad_min_silence_ms: i64, // 斷句靜音滑桿 → 靜音收句窗（映射，含 footgun 下限）
-}
-
-/// 啟動 loopback 串流 session（arm）：互斥（走 Manager.task）、起擷取執行緒、spawn run_loop（drain-only 初始）。
-/// 取 AudioSource（由 arm_audio_source 傳入）；舊 start_loopback_transcription 傳 AudioSource::System。
+/// 啟動串流 session（arm）：互斥（走 Manager.task）、起擷取執行緒、spawn run_loop（drain-only 初始）。
+/// 由 arm_audio_source 傳入 AudioSource。
 pub async fn start(
     app: AppHandle,
     mgr: Arc<tokio::sync::Mutex<session::Manager>>,

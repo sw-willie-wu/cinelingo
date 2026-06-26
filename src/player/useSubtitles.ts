@@ -6,7 +6,7 @@ import { currentAudioFfIndex } from '../mpv'
 import { usePlayer } from './usePlayer'
 import { useSettings } from './useSettings'
 import { langToWhisper } from './langs'
-import { readTextFile, listSidecarSubs, loadSubMemory, saveSubMemory, startLoopback, stopLoopback, type SidecarSub } from './backend'
+import { readTextFile, listSidecarSubs, loadSubMemory, saveSubMemory, type SidecarSub } from './backend'
 import { normKey, trackToStored, restoreTrackSource, coerceStoredEntry, type StoredEntry } from './subMemory'
 import { clampSecondaryToPrimary as clampSec, pickCcRestore, type CcSnapshot } from './ccRestore'
 
@@ -227,21 +227,6 @@ async function disable(): Promise<void> {
 /** 清掉殘留進度（provision 對話框關閉時呼叫，避免 dlText banner 殘留一閃）。 */
 function clearProgress(): void { progress.value = null }
 
-/** 子切片 1：啟動 loopback 擷取字幕（§4.7：sourceLang 必為 concrete，非自動）。 */
-async function startLoopbackCapture(deviceId: string | null): Promise<void> {
-  const s = useSettings().state
-  const { lang, prompt } = langToWhisper(s.liveSubs.sourceLang)
-  if (!lang) throw new Error('loopback 需指定明確語言（非自動）') // §4.7
-  await startLoopback(deviceId, s.liveSubs.model, lang, prompt ?? '', s.liveSubs.vad.threshold, s.liveSubs.vad.minSilenceMs)
-}
-async function stopLoopbackCapture(): Promise<void> {
-  await stopLoopback()
-  // 後端 shutdown 不發 reset 事件 → stop 必須前端自清，否則 overlay 凍住最後一行。
-  liveCues.value = []
-  liveInterim.value = null
-  noClock.value = false
-}
-
 /** Part B 還原：依 memory[key] 還原 manualFiles + 軌道；失效 manualFile 剔除並持久化。無記憶 → 不還原（N1）。 */
 async function restoreFromMemory(key: string, gen: number): Promise<void> {
   const rawEntry = memory[key]
@@ -352,7 +337,5 @@ export function useSubtitles() {
     noClock: readonly(noClock),
     liveCues: readonly(liveCues),
     liveInterim: readonly(liveInterim),
-    startLoopbackCapture,
-    stopLoopbackCapture,
   }
 }

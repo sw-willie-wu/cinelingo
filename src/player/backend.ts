@@ -64,13 +64,3 @@ export const startExternalTranscription = (
 ) => invoke<void>('start_external_transcription', { model, sourceLang, prompt, vadThreshold, vadMinSilenceMs })
 export const stopExternalTranscription = () => invoke<void>('stop_external_transcription')
 
-export const startLoopback = (
-  deviceId: string | null,
-  model: string,
-  sourceLang: string,
-  prompt: string,
-  vadThreshold: number,
-  vadMinSilenceMs: number,
-) =>
-  invoke<void>('start_loopback_transcription', { deviceId, model, sourceLang, prompt, vadThreshold, vadMinSilenceMs })
-export const stopLoopback = () => invoke<void>('stop_loopback_transcription')

@@ -4,7 +4,6 @@ import { availableMonitors } from '@tauri-apps/api/window'
 import { PhysicalSize, PhysicalPosition } from '@tauri-apps/api/dpi'
 import { setVideoHidden } from '../mpv'
 import { usePlayer } from './usePlayer'
-import { useSubtitles } from './useSubtitles'
 import { useSettings } from './useSettings'
 import { scaleFontPx } from './settings'
 import { clampToVisible, defaultFloatingRect, captionBarHeight, type Mon, type Rect } from './floatingLayout'
@@ -16,7 +15,6 @@ const active = ref(false)
 const hovering = ref(false)   // 由 FloatingCaptions 的 mouseenter/leave 驅動（無穿透 → JS 直接收滑鼠事件）
 let transitioning = false
 let savedRect: { x: number; y: number; width: number; height: number } | null = null
-let startedLoopback = false   // 本次是否由我們啟動 loopback（沿用既有字幕時為 false → 退出不要去停它）
 
 async function monitors(): Promise<Mon[]> {
   const ms = await availableMonitors()
@@ -31,20 +29,7 @@ async function applyRect(win: ReturnType<typeof getCurrentWebviewWindow>, rect: 
 async function enter(): Promise<void> {
   if (active.value || transitioning) return                 // step 0 再入/轉場守衛
   const settings = useSettings().state
-  const player = usePlayer()
-  const subs = useSubtitles()
-  // 已有可沿用的時鐘字幕（字幕檔 / mode A 即時字幕）→ 直接沿用，不開 loopback、也不需引擎/語言守衛。
-  const reuse = subs.tracks.primary.source !== 'off'
-  if (!reuse) {
-    if (!settings.liveSubs.enabled) {                        // 守衛 A：引擎備妥（僅 loopback 需要）
-      player.notify('請先在設定→即時字幕啟用並下載引擎'); return
-    }
-    if (settings.liveSubs.sourceLang === 'auto') {          // 守衛 B：明確語言（僅 loopback 需要）
-      player.notify('請先在設定→即時字幕將來源語言設為明確語言'); return
-    }
-  }
   transitioning = true
-  startedLoopback = false
   const win = getCurrentWebviewWindow()
   try {
     const pos = await win.outerPosition(); const size = await win.outerSize()
@@ -62,7 +47,6 @@ async function enter(): Promise<void> {
     await win.setAlwaysOnTop(true)
     await win.setSkipTaskbar(true)
     await win.setShadow(false)   // 關掉 Windows borderless 視窗的 DWM 陰影/邊框（細條浮動字幕才不露出框）
-    if (!reuse) { await subs.startLoopbackCapture(null); startedLoopback = true }  // 沿用既有字幕時不開 loopback
   } catch (e) {
     // 不提前清 transitioning：rollback 期間保持 true 擋住 Esc 並行 exit（避免雙重 restart）。
     await rollback()
@@ -77,8 +61,6 @@ async function enter(): Promise<void> {
 async function rollback(): Promise<void> {
   const win = getCurrentWebviewWindow()
   hovering.value = false
-  if (startedLoopback) { try { await useSubtitles().stopLoopbackCapture() } catch { /* */ } }  // 沿用既有字幕時不停它
-  startedLoopback = false
   try { await win.setAlwaysOnTop(false); await win.setSkipTaskbar(false); await win.setShadow(true) } catch { /* */ }
   if (savedRect) { try { await applyRect(win, savedRect, savedRect.height) } catch { /* */ } }
   active.value = false
