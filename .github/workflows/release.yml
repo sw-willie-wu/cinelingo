@@ -1,0 +1,62 @@
+name: Release
+
+# Build the Windows NSIS installer on every version tag and publish it to a
+# GitHub Release. Tags with a prerelease suffix (e.g. v0.2.0-test.1) are marked
+# as pre-releases; clean tags (v0.2.0) are full releases.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Derive version and channel from tag
+        id: meta
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          version="${tag#v}"
+          if [[ "$tag" == *-* ]]; then prerelease=true; else prerelease=false; fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+          echo "Tag $tag -> version $version, prerelease=$prerelease"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install npm deps
+        run: npm ci
+
+      - name: Stamp version from tag
+        run: node scripts/set-version.mjs "${{ steps.meta.outputs.version }}"
+
+      # Provision the pinned no-curl libmpv into src-tauri/lib/ before the build
+      # (7-Zip is pre-installed on windows-latest). Fails fast if it can't.
+      - name: Provision pinned libmpv
+        run: npm run setup-libmpv
+
+      - name: Build installer and publish release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: Cinelingo ${{ steps.meta.outputs.version }}
+          prerelease: ${{ steps.meta.outputs.prerelease }}
+          releaseDraft: false
+          args: --bundles nsis
