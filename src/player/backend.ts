@@ -49,8 +49,9 @@ export const saveRecent = (data: unknown) => invoke<void>('save_recent', { data 
 export const expandPlayablePaths = (paths: string[]) => invoke<string[]>('expand_playable_paths', { paths })
 export const pathExists = (path: string) => invoke<boolean>('path_exists', { path })
 
-export interface AudioDevice { id: string; name: string; isDefault: boolean }
-export interface AudioSources { devices: AudioDevice[] }
+export interface ProcessSource { pid: number; name: string }
+export interface InputDevice { id: string; name: string; isDefault: boolean }
+export interface AudioSources { processes: ProcessSource[]; inputDevices: InputDevice[] }
 export const listAudioSources = () => invoke<AudioSources>('list_audio_sources')
 export const startLoopback = (
   deviceId: string | null,

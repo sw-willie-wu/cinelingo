@@ -255,10 +255,12 @@ pub async fn remote_title(app: tauri::AppHandle, url: String) -> Result<Option<S
     Ok(remote::fetch_remote_title(&yt, &url).await)
 }
 
-/// 列出系統 render endpoints（供模式 C loopback 選音源）。COM 須在執行緒上跑 → spawn_blocking。
+/// 列出音訊程序來源與輸入裝置（供音源選擇 UI）。COM 須在執行緒上跑 → spawn_blocking。
 #[tauri::command]
 pub async fn list_audio_sources() -> Result<crate::capture::loopback::AudioSources, String> {
-    tauri::async_runtime::spawn_blocking(crate::capture::loopback::list_sources)
-        .await
-        .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(|| {
+        let processes = crate::capture::sessions::list_audio_processes().unwrap_or_default();
+        let input_devices = crate::capture::loopback::list_input_devices().unwrap_or_default();
+        Ok(crate::capture::loopback::AudioSources { processes, input_devices })
+    }).await.map_err(|e| e.to_string())?
 }

@@ -77,9 +77,9 @@ pub struct AudioDevice {
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioSources {
-    pub devices: Vec<AudioDevice>,
+    pub processes: Vec<crate::capture::sessions::ProcessSource>,
+    pub input_devices: Vec<AudioDevice>,
 }
-// processes（單一程式 loopback）留後續 (1b)。
 
 /// 列出 capture（麥克風/輸入）裝置（wasapi 0.19）。必須在 spawn_blocking 內呼叫（COM）。
 pub fn list_input_devices() -> Result<Vec<AudioDevice>, String> {
@@ -105,36 +105,6 @@ pub fn list_input_devices() -> Result<Vec<AudioDevice>, String> {
         devices.push(AudioDevice { id, name, is_default });
     }
     Ok(devices)
-}
-
-/// 列出 render endpoints（wasapi 0.19）。必須在 spawn_blocking 內呼叫（COM）。
-pub fn list_sources() -> Result<AudioSources, String> {
-    // 在此 OS 執行緒初始化 COM (MTA)。重複呼叫回 S_FALSE（非失敗）→ 忽略即可。
-    let _ = wasapi::initialize_mta();
-
-    let default_id = wasapi::get_default_device(&wasapi::Direction::Render)
-        .ok()
-        .and_then(|d| d.get_id().ok());
-
-    let collection = wasapi::DeviceCollection::new(&wasapi::Direction::Render)
-        .map_err(|e| format!("列舉 render 裝置失敗: {e}"))?;
-    let count = collection.get_nbr_devices().map_err(|e| e.to_string())?;
-
-    let mut devices = Vec::new();
-    for i in 0..count {
-        let dev = match collection.get_device_at_index(i) {
-            Ok(d) => d,
-            Err(_) => continue,
-        };
-        let id = match dev.get_id() {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        let name = dev.get_friendlyname().unwrap_or_else(|_| id.clone());
-        let is_default = default_id.as_deref() == Some(id.as_str());
-        devices.push(AudioDevice { id, name, is_default });
-    }
-    Ok(AudioSources { devices })
 }
 
 // ─────────────────────── Task 9: loopback 擷取執行緒 ───────────────────────
