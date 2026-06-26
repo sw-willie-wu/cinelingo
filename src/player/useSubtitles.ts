@@ -320,6 +320,17 @@ const activeText = (track: TrackName, t: number): string =>
 const isTranscribing = (track: TrackName, t: number): boolean =>
   tracks[track].source === 'live' && t > frontierSec.value && !activeText(track, t)
 
+/** 純函式：依播放狀態與 armed 狀態決定 CC 鈕三態。
+ *  playing=true → 'file'（控制片字幕）
+ *  idle + armed  → 'external'（外部辨識 toggle）
+ *  idle 未 armed → 'disabled'
+ */
+export function ccMode(playing: boolean, armed: boolean): 'file' | 'external' | 'disabled' {
+  if (playing) return 'file'
+  if (armed) return 'external'
+  return 'disabled'
+}
+
 export function useSubtitles() {
   ensureWired()
   return {
