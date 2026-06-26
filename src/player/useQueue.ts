@@ -1,9 +1,10 @@
 import { reactive } from 'vue'
 import { usePlayer } from './usePlayer'
 import { useRecent } from './useRecent'
-import { resolveRemote } from './backend'
+import { resolveRemote, stopExternalTranscription } from './backend'
 import { useSettings } from './useSettings'
 import { REMOTE_TITLE_LOADING, type QueueItem } from './queueTypes'
+import { useAudioSource } from './useAudioSource'
 
 const items = reactive<QueueItem[]>([])
 const state = reactive<{ index: number }>({ index: -1 })
@@ -25,6 +26,12 @@ async function playAt(i: number): Promise<void> {
   ended = false                          // 開始一次播放 → 清除「已播完」狀態
   state.index = i
   const item = items[i]
+  // 轉場：若外部音源已 armed，先解除並停擷取轉寫（fire-and-forget；後端 no-op 若未在轉寫）
+  const audioSource = useAudioSource()
+  if (audioSource.armed.value) {
+    void audioSource.disarm()
+    void stopExternalTranscription()
+  }
   let ok = false
   if (item.kind === 'remote') {
     player.setResolving(true)
@@ -58,7 +65,7 @@ async function prev(): Promise<void> {
 
 async function enqueueItems(
   newItems: QueueItem[],
-  opts?: { startOffset?: number; interrupt?: boolean },
+  opts?: { startOffset?: number; interrupt?: boolean; noAutoplay?: boolean },
 ): Promise<void> {
   if (newItems.length === 0) return
   const wasEmpty = items.length === 0
@@ -66,9 +73,9 @@ async function enqueueItems(
   items.push(...newItems)                  // 一律 append（Q1：清單也 append、不取代）
   const off = opts?.startOffset ?? 0
   let target: number | null = null
-  if (wasEmpty || ended) target = base + off  // 空佇列 或 上一輪已播完停住 → 自動播新加入的進入點
+  if ((wasEmpty || ended) && !opts?.noAutoplay) target = base + off  // 空佇列 或 已播完 且非 noAutoplay → 自動播進入點
   else if (opts?.interrupt) target = base + off  // 非空＋interrupt：跳到新加入項（最近點擊）
-  // else（非空、播放中、不 interrupt）→ 只 append、不打斷
+  // else（非空、播放中、不 interrupt；或 noAutoplay）→ 只 append、不打斷
   if (target != null) await playAt(target)
 }
 

@@ -18,7 +18,10 @@ const player = {
 const recent = { record: vi.fn(), load: vi.fn(), refreshMissing: vi.fn(), items: [] }
 vi.mock('../player/usePlayer', () => ({ usePlayer: () => player }))
 vi.mock('../player/useRecent', () => ({ useRecent: () => recent }))
-vi.mock('../player/backend', () => ({ resolveRemote: vi.fn(async () => ({ playbackUrl: 'u', httpHeaders: {}, isLive: false })) }))
+vi.mock('../player/backend', () => ({
+  resolveRemote: vi.fn(async () => ({ playbackUrl: 'u', httpHeaders: {}, isLive: false })),
+  stopExternalTranscription: vi.fn(async () => {}),
+}))
 
 import { useQueue } from '../player/useQueue'
 import { resolveRemote } from '../player/backend'
@@ -75,6 +78,12 @@ describe('enqueueItems', () => {
     await q.enqueueItems([L('only')], { interrupt: true })
     expect(player.loadPath).toHaveBeenCalledWith('only')
     expect(q.state.index).toBe(0)
+  })
+  it('noAutoplay suppresses autoplay on empty queue', async () => {
+    const q = useQueue()
+    await q.enqueueItems([L('a')], { noAutoplay: true })
+    expect(q.items.length).toBe(1)
+    expect(player.loadPath).not.toHaveBeenCalled()
   })
 })
 
