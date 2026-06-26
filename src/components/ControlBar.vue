@@ -11,6 +11,7 @@ import VolumeControl from './VolumeControl.vue'
 import SubtitleControls from './SubtitleControls.vue'
 import QueuePanel from './QueuePanel.vue'
 import AdjustPanel from './AdjustPanel.vue'
+import MicButton from './MicButton.vue'
 import { useSettings } from '../player/useSettings'
 import { pickForPref } from '../player/quality'
 
@@ -70,6 +71,7 @@ const showAdjust = ref(false)
           <PlayerIcon name="adjust" />
           <span v-if="qualityBadge" class="q-badge">{{ qualityBadge }}</span>
         </button>
+        <MicButton :disabled="!player.isIdle.value" />
         <button class="btn" aria-label="浮動字幕" title="浮動字幕（疊在其他視窗上）" @click="floating.enter()">
           <PlayerIcon name="floating-subs" />
         </button>

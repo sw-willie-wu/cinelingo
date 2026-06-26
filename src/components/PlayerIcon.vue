@@ -16,6 +16,7 @@ export type IconName =
   | 'close' | 'back' | 'grid' | 'minimize' | 'maximize' | 'restore'
   | 'floating-subs'
   | 'adjust'
+  | 'mic'
 
 withDefaults(defineProps<{ name: IconName; size?: number }>(), { size: 20 })
 </script>
@@ -172,5 +173,13 @@ withDefaults(defineProps<{ name: IconName; size?: number }>(), { size: 20 })
     <circle cx="15" cy="12" r="2.2" fill="currentColor" stroke="none" />
     <line x1="4" y1="17" x2="20" y2="17" />
     <circle cx="10" cy="17" r="2.2" fill="currentColor" stroke="none" />
+  </svg>
+
+  <!-- mic（麥克風） -->
+  <svg v-else-if="name === 'mic'" :width="size" :height="size" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="9" y="2" width="6" height="11" rx="3"/>
+    <path d="M19 10a7 7 0 0 1-14 0"/>
+    <line x1="12" y1="19" x2="12" y2="23"/>
+    <line x1="8" y1="23" x2="16" y2="23"/>
   </svg>
 </template>
