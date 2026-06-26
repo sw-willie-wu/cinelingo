@@ -238,15 +238,16 @@ pub struct LoopbackParams {
     pub vad_min_silence_ms: i64, // 斷句靜音滑桿 → 靜音收句窗（映射，含 footgun 下限）
 }
 
-/// 啟動 loopback 串流 session：互斥（走 Manager.task）、起擷取執行緒、spawn 迴圈。
+/// 啟動 loopback 串流 session（arm）：互斥（走 Manager.task）、起擷取執行緒、spawn run_loop（drain-only 初始）。
+/// 取 AudioSource（由 arm_audio_source 傳入）；舊 start_loopback_transcription 傳 AudioSource::System。
 pub async fn start(
     app: AppHandle,
     mgr: Arc<tokio::sync::Mutex<session::Manager>>,
-    params: LoopbackParams,
+    source: crate::capture::source::AudioSource,
     downloading: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
 ) -> Result<(), String> {
     let data = crate::data_dir(&app)?.join("subs");
-    let (stop, thread, rx) = loopback::start_capture(crate::capture::source::AudioSource::System)?;
+    let (stop, thread, rx) = loopback::start_capture(source)?;
     let app2 = app.clone();
     let mgr2 = mgr.clone();
     {
@@ -258,9 +259,11 @@ pub async fn start(
         m.set_data_dir(data.clone());
         m.set_capture(stop.clone(), thread);
         let cancel = m.cancel_arc();
+        let transcribe = m.transcribe_flag();
+        let params_h = m.params_handle();
         app.emit("sub-session-reset", SessionResetEvent { session_id: session_id.clone(), no_clock: true }).ok();
         let handle = tauri::async_runtime::spawn(async move {
-            if let Err(e) = run_loop(app2.clone(), mgr2, session_id, params, data, downloading, cancel, rx, stop).await {
+            if let Err(e) = run_loop(app2.clone(), mgr2, session_id, transcribe, params_h, data, downloading, cancel, rx, stop).await {
                 app2.emit("sub-progress", ProgressEvent { phase: "error".into(), done: 0, total: None, message: e }).ok();
             }
         });
@@ -276,7 +279,8 @@ async fn run_loop(
     app: AppHandle,
     mgr: Arc<tokio::sync::Mutex<session::Manager>>,
     session_id: String,
-    params: LoopbackParams,
+    transcribe: Arc<AtomicBool>,
+    params_h: Arc<std::sync::Mutex<Option<session::TranscribeParams>>>,
     data: std::path::PathBuf,
     downloading: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     cancel: Arc<AtomicBool>,
@@ -286,13 +290,8 @@ async fn run_loop(
     // 串流 server 維持 --vad OFF：內建 --vad 在 silero 判 0-speech 的窗會崩潰退出（實測一開即中），
     // 重啟＝60s 模型重載、不可行。要對齊 WhisperLive vad_filter 須走 client-side silero 預過濾（另做）。
     let vad = session::VadParams { threshold: 0.5, min_silence_ms: 100, vad_enabled: false };
-    let mut port = session::ensure_server(&app, &mgr, &data, &cancel, &params.model, &vad, &downloading).await?;
-    let http = { mgr.lock().await.http_clone().ok_or("no http")? };
-    let lang = params.source_lang;
-    let prompt = params.prompt.clone();                 // 靜態 steering（§3.1；見 LoopbackParams 改動）
-    let rms_thresh = vad_threshold_to_rms(params.vad_threshold);
-    let silence_window = min_silence_to_window(params.vad_min_silence_ms);
     let rate = loopback::TARGET_RATE as f64;
+    const MAX_DRAIN_SEC: f64 = 2.0;
 
     let mut frames: Vec<f32> = Vec::new();
     let mut offset_sec: f64 = 0.0;
@@ -302,14 +301,70 @@ async fn run_loop(
     let mut agreement_count: u32 = 0;
     let mut held: Option<HeldInterim> = None;
     let mut recent_text = String::new(); // 滾動近期已定稿文字（prompt 上下文，per-session 起空）
+    let mut server_ready = false;
+    let mut port = 0u16;
+    let mut active: Option<(String /*lang*/, String /*prompt*/, String /*model*/)> = None;
+    let mut last_level = std::time::Instant::now();
     app.emit("sub-progress", ProgressEvent { phase: "decode".into(), done: 0, total: None, message: "擷取中".into() }).ok();
 
     while !cancel.load(Ordering::SeqCst) {
         let mut got = 0usize;
         while let Ok(chunk) = rx.try_recv() { got += chunk.len(); frames.extend(chunk); }
         captured_sec += got as f64 / rate;
-        let buffer_len = frames.len() as f64 / rate;
 
+        // 聲源視覺化：每 ~80ms emit 近窗 RMS（drain 與轉寫期間都送，成本極低）
+        if last_level.elapsed() >= std::time::Duration::from_millis(80) {
+            let n = (rate * 0.1) as usize; // 近 100ms 窗
+            let tail = if frames.len() > n { &frames[frames.len() - n..] } else { &frames[..] };
+            let rms = loopback::rms(tail);
+            app.emit("capture-level", rms).ok();
+            last_level = std::time::Instant::now();
+        }
+
+        if !transcribe.load(Ordering::SeqCst) {
+            // CC 關 → drain-only 模式：重置 server 狀態、bounded drain（最多保留 MAX_DRAIN_SEC）
+            server_ready = false;
+            active = None;
+            let keep = (MAX_DRAIN_SEC * rate) as usize;
+            if frames.len() > keep {
+                frames.drain(0..frames.len() - keep);
+                offset_sec = captured_sec - MAX_DRAIN_SEC;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(CADENCE_MS)).await;
+            continue;
+        }
+
+        // CC 開：確保 server 就緒（lazy，首次或 CC 重開時才載模型）
+        if !server_ready {
+            let p_opt = { params_h.lock().unwrap().clone() }; // guard dropped before any await
+            let p = match p_opt {
+                Some(p) => p,
+                None => {
+                    tokio::time::sleep(std::time::Duration::from_millis(CADENCE_MS)).await;
+                    continue;
+                }
+            };
+            port = session::ensure_server(&app, &mgr, &data, &cancel, &p.model, &vad, &downloading).await?;
+            active = Some((p.source_lang.clone(), p.prompt.clone(), p.model.clone()));
+            server_ready = true;
+            // reset offset/buffer 邊界，避免把 drain-only 期間的舊音當待轉
+            offset_sec = captured_sec;
+            frames.clear();
+            recent_text.clear();
+        }
+
+        let http = { mgr.lock().await.http_clone().ok_or("no http")? };
+        let (lang, prompt, model) = active.as_ref().unwrap().clone();
+        // 從 params_h 讀最新的 vad 參數（每輪重讀以支援動態調整）
+        let (rms_thresh, silence_window) = {
+            let lock = params_h.lock().unwrap();
+            match lock.as_ref() {
+                Some(p) => (vad_threshold_to_rms(p.vad_threshold), min_silence_to_window(p.vad_min_silence_ms)),
+                None => (vad_threshold_to_rms(0.5), min_silence_to_window(100)),
+            }
+        };
+
+        let buffer_len = frames.len() as f64 / rate;
         let tail_speech = buffer_len >= MIN_SPEECH_BUFFER_SEC
             && loopback::tail_has_speech(&frames, silence_window, rms_thresh);
         if tail_speech { last_speech_sec = captured_sec; }
@@ -327,7 +382,7 @@ async fn run_loop(
                 Err(e) => {
                     eprintln!("[stream] transcribe 失敗（server 可能崩潰），重啟續跑：{e}");
                     mgr.lock().await.invalidate_server();
-                    port = session::ensure_server(&app, &mgr, &data, &cancel, &params.model, &vad, &downloading).await?;
+                    port = session::ensure_server(&app, &mgr, &data, &cancel, &model, &vad, &downloading).await?;
                     continue;
                 }
             };

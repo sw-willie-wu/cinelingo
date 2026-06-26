@@ -6,6 +6,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 
+/// 外部串流轉寫（capture CC）所需參數：由 start_external_transcription 設入 Manager。
+#[derive(Clone, Debug)]
+pub struct TranscribeParams {
+    pub model: String,
+    pub source_lang: String,
+    pub prompt: String,
+    pub vad_threshold: f64,
+    pub vad_min_silence_ms: i64,
+}
+
 /// VAD 啟動參數（whisper-server 啟動旗標；改值需重啟 server）。
 #[derive(Clone, Debug)]
 pub struct VadParams {
@@ -53,7 +63,6 @@ pub struct SessionParams {
     pub overwrite_on_param_change: bool,
 }
 
-#[derive(Default)]
 pub struct Manager {
     counter: u64,
     server: Option<whisper::WhisperServer>,
@@ -67,6 +76,29 @@ pub struct Manager {
     data_dir: Option<PathBuf>,
     capture_stop: Option<std::sync::Arc<AtomicBool>>,
     capture_thread: Option<std::thread::JoinHandle<()>>,
+    transcribe_enabled: Arc<AtomicBool>,
+    transcribe_params: Arc<std::sync::Mutex<Option<TranscribeParams>>>,
+}
+
+impl Default for Manager {
+    fn default() -> Self {
+        Self {
+            counter: 0,
+            server: None,
+            loaded_model: None,
+            loaded_vad: None,
+            ffmpeg: None,
+            http: None,
+            task: None,
+            seek_to: Arc::new(std::sync::Mutex::new(None)),
+            cancel: Arc::new(AtomicBool::new(false)),
+            data_dir: None,
+            capture_stop: None,
+            capture_thread: None,
+            transcribe_enabled: Arc::new(AtomicBool::new(false)),
+            transcribe_params: Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
 }
 
 /// 刪除 data 內所有 track-*.wav / win-*.wav 暫存（best-effort）。
@@ -140,6 +172,12 @@ impl Manager {
     pub(crate) fn set_data_dir(&mut self, d: std::path::PathBuf) { self.data_dir = Some(d); }
     pub(crate) fn set_task(&mut self, h: tauri::async_runtime::JoinHandle<()>) { self.task = Some(h); }
     pub(crate) fn http_clone(&self) -> Option<reqwest::Client> { self.http.clone() }
+
+    // Transcribe flag + params accessors（arm/transcribe 拆分）
+    pub fn transcribe_flag(&self) -> Arc<AtomicBool> { self.transcribe_enabled.clone() }
+    pub fn params_handle(&self) -> Arc<std::sync::Mutex<Option<TranscribeParams>>> { self.transcribe_params.clone() }
+    pub fn set_transcribe(&self, on: bool) { self.transcribe_enabled.store(on, Ordering::SeqCst); }
+    pub fn set_transcribe_params(&self, p: TranscribeParams) { *self.transcribe_params.lock().unwrap() = Some(p); }
 }
 
 pub async fn start(

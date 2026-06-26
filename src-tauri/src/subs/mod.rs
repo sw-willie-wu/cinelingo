@@ -192,20 +192,75 @@ pub async fn stop_transcription(state: tauri::State<'_, SubsState>) -> Result<()
 pub async fn start_loopback_transcription(
     app: tauri::AppHandle,
     state: tauri::State<'_, SubsState>,
-    device_id: Option<String>,
+    _device_id: Option<String>,
     model: String,
     source_lang: String, // §4.7：前端保證 concrete（非 auto）
     prompt: String,
     vad_threshold: f64,
     vad_min_silence_ms: i64,
 ) -> Result<(), String> {
-    let params = stream::LoopbackParams { device_id, model, source_lang, prompt, vad_threshold, vad_min_silence_ms };
-    stream::start(app, state.inner.clone(), params, state.downloading.clone()).await
+    // 舊路徑（T13 前仍需保留）：arm + 立刻 set transcribe params + enable transcribe
+    {
+        let m = state.inner.lock().await;
+        m.set_transcribe_params(session::TranscribeParams {
+            model, source_lang, prompt, vad_threshold, vad_min_silence_ms,
+        });
+        m.set_transcribe(true);
+    }
+    stream::start(app, state.inner.clone(), crate::capture::source::AudioSource::System, state.downloading.clone()).await
 }
 
 #[tauri::command]
 pub async fn stop_loopback_transcription(state: tauri::State<'_, SubsState>) -> Result<(), String> {
     state.inner.lock().await.shutdown().await; // 停 task + capture thread + 殺 server + 掃暫存
+    Ok(())
+}
+
+// ── arm / transcribe 拆分指令（T6；舊 loopback 指令待 T13 移除）────────────────
+
+#[tauri::command]
+pub async fn arm_audio_source(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, SubsState>,
+    source: crate::capture::source::AudioSource,
+) -> Result<(), String> {
+    let mgr = state.inner.clone();
+    let downloading = state.downloading.clone();
+    { let m = mgr.lock().await; m.set_transcribe(false); } // 確保 run_loop 以 drain-only 模式啟動
+    stream::start(app, mgr, source, downloading).await
+}
+
+#[tauri::command]
+pub async fn disarm_audio_source(state: tauri::State<'_, SubsState>) -> Result<(), String> {
+    let mut m = state.inner.lock().await;
+    m.set_transcribe(false);
+    m.stop_task_pub(); // abort run_loop + 停 capture thread
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn start_external_transcription(
+    state: tauri::State<'_, SubsState>,
+    model: String,
+    source_lang: String,
+    prompt: String,
+    vad_threshold: f64,
+    vad_min_silence_ms: i64,
+) -> Result<(), String> {
+    if source_lang == "auto" || source_lang.is_empty() {
+        return Err("即時辨識需指定明確語言（非自動）".into());
+    }
+    let m = state.inner.lock().await;
+    m.set_transcribe_params(session::TranscribeParams {
+        model, source_lang, prompt, vad_threshold, vad_min_silence_ms,
+    });
+    m.set_transcribe(true);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn stop_external_transcription(state: tauri::State<'_, SubsState>) -> Result<(), String> {
+    state.inner.lock().await.set_transcribe(false);
     Ok(())
 }
 
