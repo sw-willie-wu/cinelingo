@@ -140,6 +140,10 @@ describe('settings defaults + merge', () => {
     expect(m.video.saturation).toBe(0)
     expect(m.audio.eq.bands.length).toBe(10)
   })
+  it('audioSource defaults null on legacy', () => {
+    const merged = mergeSettings({ liveSubs: { model: 'turbo' } } as any)
+    expect(merged.liveSubs.audioSource).toBeNull()
+  })
 })
 
 describe('playback.videoOutput', () => {

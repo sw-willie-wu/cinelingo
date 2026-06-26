@@ -4,6 +4,7 @@ export type ModelKey = 'small' | 'medium' | 'turbo' | 'large-v3'
 export type OutlineLevel = 'none' | 'thin' | 'mid' | 'thick'
 export type SubBackground = 'none' | 'translucent'
 export type VideoOutput = 'gpu' | 'gpu-next'
+export type PersistedSource = { kind: 'system' } | { kind: 'process'; name: string } | { kind: 'inputDevice'; id: string }
 
 export interface SubStyle {
   fontSize: number   // 1080p 參考高度下的 px 基準
@@ -16,7 +17,7 @@ export interface ImageAdjust { brightness: number; contrast: number; saturation:
 export interface EqState { enabled: boolean; preset: string; bands: number[] } // bands 長度 10
 export interface Settings {
   version: number
-  liveSubs: { enabled: boolean; model: ModelKey; sourceLang: string; saveSrt: boolean; overwriteOnParamChange: boolean; vad: { threshold: number; minSilenceMs: number }; display: { lines: number } }
+  liveSubs: { enabled: boolean; model: ModelKey; sourceLang: string; saveSrt: boolean; overwriteOnParamChange: boolean; vad: { threshold: number; minSilenceMs: number }; display: { lines: number }; audioSource: PersistedSource | null }
   hardware: { accelEnabled: boolean | null }
   appearance: { maxWidthPct: number; primary: SubStyle; secondary: SubStyle }
   ui: { language: string }
@@ -39,7 +40,7 @@ const VIDEO_OUTPUTS: VideoOutput[] = ['gpu', 'gpu-next']
 export function defaultSettings(): Settings {
   return {
     version: SETTINGS_VERSION,
-    liveSubs: { enabled: false, model: 'turbo', sourceLang: 'auto', saveSrt: true, overwriteOnParamChange: false, vad: { threshold: 0.5, minSilenceMs: 100 }, display: { lines: 3 } },
+    liveSubs: { enabled: false, model: 'turbo', sourceLang: 'auto', saveSrt: true, overwriteOnParamChange: false, vad: { threshold: 0.5, minSilenceMs: 100 }, display: { lines: 3 }, audioSource: null },
     hardware: { accelEnabled: null },
     appearance: {
       maxWidthPct: 80,
@@ -64,6 +65,20 @@ const clamp = (v: number, lo: number, hi: number): number => (v < lo ? lo : v > 
 const str = (v: unknown, def: string): string => (typeof v === 'string' ? v : def)
 const bool = (v: unknown, def: boolean): boolean => (typeof v === 'boolean' ? v : def)
 const obj = (v: unknown): Record<string, unknown> => (v && typeof v === 'object' ? (v as Record<string, unknown>) : {})
+const persistedSource = (v: unknown): PersistedSource | null => {
+  const o = obj(v)
+  const kind = str(o.kind, '')
+  if (kind === 'system') return { kind: 'system' }
+  if (kind === 'process') {
+    const name = str(o.name, '')
+    if (name) return { kind: 'process', name }
+  }
+  if (kind === 'inputDevice') {
+    const id = str(o.id, '')
+    if (id) return { kind: 'inputDevice', id }
+  }
+  return null
+}
 
 function mergeStyle(raw: unknown, def: SubStyle): SubStyle {
   const r = obj(raw)
@@ -105,6 +120,7 @@ export function mergeSettings(raw: unknown): Settings {
           lines: clamp(Math.round(num(dp.lines, d.liveSubs.display.lines)), 2, 5),
         }
       })(),
+      audioSource: persistedSource(ls.audioSource),
     },
     hardware: { accelEnabled: typeof hw.accelEnabled === 'boolean' ? hw.accelEnabled : null },
     appearance: {
