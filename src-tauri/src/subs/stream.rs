@@ -65,6 +65,27 @@ pub const FORCE_COMMIT_SEC: f64 = 30.0;     // T4 安全 cap
 pub const FINALIZE_SILENCE_SEC: f64 = 0.7;  // T3 句末靜音門檻（遲滯、獨立於短 gate）
 // SILENCE_KEEP_SEC / MIN_SPEECH_BUFFER_SEC 沿用既有
 
+// 回灌近期已定稿文字當 prompt（對齊 WhisperLive condition_on_previous_text）：上限字元數。
+// whisper prompt ~224 token 上限，CJK 約 1+ token/字 → 取保守值，超過從前端 trim。
+pub const RECENT_CONTEXT_CHARS: usize = 140;
+
+/// 取字串尾端最多 max_chars 個字元（按 char 切、CJK 安全，不會壞字）。純函式。
+pub fn tail_chars(s: &str, max_chars: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max_chars { return s.to_string(); }
+    chars[chars.len() - max_chars..].iter().collect()
+}
+
+/// 組 whisper prompt：靜態 steering（繁/簡）+ 近期已定稿文字（條件化解碼）。純函式。
+pub fn build_prompt(steering: &str, recent: &str) -> String {
+    match (steering.is_empty(), recent.is_empty()) {
+        (true, true) => String::new(),
+        (false, true) => steering.to_string(),
+        (true, false) => recent.to_string(),
+        (false, false) => format!("{steering} {recent}"),
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct WordTs { pub word: String, pub start_sec: f64, pub end_sec: f64 }
 
@@ -262,6 +283,8 @@ async fn run_loop(
     rx: std::sync::mpsc::Receiver<Vec<f32>>,
     _stop: Arc<AtomicBool>,
 ) -> Result<(), String> {
+    // 串流 server 維持 --vad OFF：內建 --vad 在 silero 判 0-speech 的窗會崩潰退出（實測一開即中），
+    // 重啟＝60s 模型重載、不可行。要對齊 WhisperLive vad_filter 須走 client-side silero 預過濾（另做）。
     let vad = session::VadParams { threshold: 0.5, min_silence_ms: 100, vad_enabled: false };
     let mut port = session::ensure_server(&app, &mgr, &data, &cancel, &params.model, &vad, &downloading).await?;
     let http = { mgr.lock().await.http_clone().ok_or("no http")? };
@@ -278,6 +301,7 @@ async fn run_loop(
     let mut last_interim_text = String::new();
     let mut agreement_count: u32 = 0;
     let mut held: Option<HeldInterim> = None;
+    let mut recent_text = String::new(); // 滾動近期已定稿文字（prompt 上下文，per-session 起空）
     app.emit("sub-progress", ProgressEvent { phase: "decode".into(), done: 0, total: None, message: "擷取中".into() }).ok();
 
     while !cancel.load(Ordering::SeqCst) {
@@ -292,7 +316,9 @@ async fn run_loop(
         let trailing_silence = captured_sec - last_speech_sec;
         let silence_boundary = trailing_silence >= FINALIZE_SILENCE_SEC && held.is_some();
 
-        let pr = if prompt.is_empty() { None } else { Some(prompt.as_str()) };
+        // 靜態 steering + 近期已定稿文字 → 條件化解碼（同音字/專有名詞一致性）。
+        let combined_prompt = build_prompt(&prompt, &recent_text);
+        let pr = if combined_prompt.is_empty() { None } else { Some(combined_prompt.as_str()) };
 
         if tail_speech || silence_boundary {
             // 路徑 A / 路徑 B：轉寫 + step
@@ -311,7 +337,11 @@ async fn run_loop(
                 last_interim_text: &last_interim_text, agreement_count,
                 held_interim: held.clone(), session_id: &session_id, lang: &lang,
             });
-            for f in &o.finals { app.emit("sub-cue", f).ok(); }
+            for f in &o.finals {
+                app.emit("sub-cue", f).ok();
+                recent_text.push_str(&f.source_text); // 累積已定稿（已過 collapse，不會灌重複牆）
+            }
+            recent_text = tail_chars(&recent_text, RECENT_CONTEXT_CHARS);
             if let Some(it) = &o.interim { app.emit("sub-cue", it).ok(); }
             if o.trim_to_sample > 0 { frames.drain(0..o.trim_to_sample); }
             offset_sec = o.new_offset_sec;
@@ -463,6 +493,23 @@ mod tests {
         let o2 = step(base_input(&segs2, true, false, 0.0, 2.0, "", 0));
         assert!(o2.finals.is_empty());
         assert_eq!(o2.new_offset_sec, 1.0);
+    }
+
+    // ── 回灌 prompt 上下文 ────────────────────────────────────────────────────
+    #[test]
+    fn tail_chars_keeps_last_n_cjk_safe() {
+        assert_eq!(tail_chars("一二三四五", 3), "三四五");
+        assert_eq!(tail_chars("一二三", 5), "一二三"); // 短於上限原樣
+        assert_eq!(tail_chars("", 3), "");
+        assert_eq!(tail_chars("abcde", 2), "de");
+    }
+
+    #[test]
+    fn build_prompt_combines_steering_and_recent() {
+        assert_eq!(build_prompt("", ""), "");
+        assert_eq!(build_prompt("以下是繁體", ""), "以下是繁體");
+        assert_eq!(build_prompt("", "前文內容"), "前文內容");
+        assert_eq!(build_prompt("以下是繁體", "前文內容"), "以下是繁體 前文內容");
     }
 
     // ── Task 1: collapse_repetition ──────────────────────────────────────────
