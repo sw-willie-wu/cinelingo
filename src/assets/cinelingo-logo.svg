@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 220 220"><defs>
+  <linearGradient id="slcc-bd" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#3c4d66"></stop><stop offset="1" stop-color="#1c2738"></stop></linearGradient>
+  <linearGradient id="slcc-st" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#16202e"></stop><stop offset="1" stop-color="#0a0f17"></stop></linearGradient>
+  <linearGradient id="slcc-sh" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffffff" stop-opacity="0.22"></stop><stop offset="1" stop-color="#ffffff" stop-opacity="0"></stop></linearGradient>
+  <radialGradient id="slcc-bg" cx="0.3" cy="0.06" r="1.15"><stop offset="0" stop-color="#24364f"></stop><stop offset="0.46" stop-color="#0c1119"></stop><stop offset="1" stop-color="#05070a"></stop></radialGradient>
+  <clipPath id="slcc-clip"><rect x="30" y="56" width="160" height="28" rx="10"></rect></clipPath></defs>
+  <g transform="rotate(5 110 135)">
+    <rect x="32" y="86" width="156" height="98" rx="16" fill="url(#slcc-bd)"></rect>
+    <rect x="32" y="86" width="156" height="58" rx="16" fill="url(#slcc-sh)"></rect>
+    <g transform="rotate(-17 38 90)">
+      <rect x="30" y="56" width="160" height="28" rx="10" fill="url(#slcc-st)"></rect>
+      <g clip-path="url(#slcc-clip)">
+        <polygon points="44,56 64,56 48,84 28,84" fill="#eef3f9"></polygon>
+        <polygon points="84,56 104,56 88,84 68,84" fill="#7d8ea3"></polygon>
+        <polygon points="124,56 144,56 128,84 108,84" fill="#eef3f9"></polygon>
+        <polygon points="164,56 184,56 168,84 148,84" fill="#7d8ea3"></polygon>
+      </g>
+    </g>
+    <path d="M119.8,119.9 Q147.2,135 119.8,150.1 Q92.4,165.2 92.4,135 Q92.4,104.8 119.8,119.9 Z" fill="none" stroke="#f2f6fb" stroke-width="9" stroke-linejoin="round" stroke-linecap="round"></path>
+  </g></svg>

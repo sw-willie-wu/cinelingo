@@ -1,0 +1,18 @@
+:root {
+  /* 主題色（之後要改主色就改這裡；元件逐步改用 var(--accent) 即可一處生效） */
+  --accent-rgb: 74, 163, 255;
+  --accent: rgb(var(--accent-rgb));
+}
+
+html, body, #app {
+  background: transparent !important;
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+/* 自動隱藏:overlay 加此 class 時隱藏游標 */
+.cursor-hidden,
+.cursor-hidden * {
+  cursor: none !important;
+}
