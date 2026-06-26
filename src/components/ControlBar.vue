@@ -49,10 +49,13 @@ const showAdjust = ref(false)
         <span v-if="player.state.path" class="time">{{ timeText }}</span>
       </div>
 
-      <!-- 中:prev / 後退5 / 播放 / 前進5 / next(絕對置中) -->
+      <!-- 中:prev / 後退5 / 停止 / 播放 / 前進5 / next(絕對置中) -->
       <div class="group center">
         <button class="btn" aria-label="上一個" @click="queue.prev()"><PlayerIcon name="prev" /></button>
         <button class="btn" aria-label="後退5秒" @click="player.seekBy(-5)"><PlayerIcon name="back5" /></button>
+        <button class="btn stop-btn" :disabled="player.isIdle.value" aria-label="停止播放" title="停止播放（回首頁）" @click="player.closeMedia()">
+          <span class="stop-sq" />
+        </button>
         <button class="btn btn-play" :aria-label="player.state.pause === false ? '暫停' : '播放'" @click="player.togglePause()">
           <PlayerIcon :name="player.state.pause === false ? 'pause' : 'play'" :size="22" />
         </button>
@@ -121,4 +124,6 @@ const showAdjust = ref(false)
 }
 .btn-play:hover { color: #fff; filter: drop-shadow(0 0 5px rgba(255, 255, 255, 0.8)) drop-shadow(0 0 15px rgba(255, 255, 255, 0.5)); }
 .btn-play:active { transform: scale(0.92); }
+.stop-btn:disabled { opacity: 0.35; cursor: default; }
+.stop-sq { width: 13px; height: 13px; border-radius: 2px; background: currentColor; display: block; }
 </style>
