@@ -1,6 +1,8 @@
-import { describe, it, expect } from 'vitest'
-import { resolveSource } from './useAudioSource'
+import { describe, it, expect, vi } from 'vitest'
+import { resolveSource, normalizeLevel } from './useAudioSource'
 import type { AudioSources } from './backend'
+
+vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn().mockResolvedValue(() => {}) }))
 
 const live: AudioSources = { processes: [{ pid: 9, name: 'chrome.exe' }], inputDevices: [] }
 
@@ -16,5 +18,13 @@ describe('resolveSource', () => {
   })
   it('system kind → system', () => {
     expect(resolveSource({ kind: 'system' }, live)).toEqual({ kind: 'system' })
+  })
+})
+
+describe('normalizeLevel', () => {
+  it('normalizes rms to 0..1 clamped', () => {
+    expect(normalizeLevel(0)).toBe(0)
+    expect(normalizeLevel(1)).toBe(1)            // 大訊號夾到 1
+    expect(normalizeLevel(0.05)).toBeCloseTo(0.3, 1) // 小訊號線性放大（GAIN=6）
   })
 })

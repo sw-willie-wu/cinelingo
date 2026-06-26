@@ -1,9 +1,15 @@
 import { ref, readonly } from 'vue'
 import type { Ref } from 'vue'
+import { listen } from '@tauri-apps/api/event'
 import type { AudioSources } from './backend'
 import { listAudioSources, armAudioSource, disarmAudioSource } from './backend'
 import type { PersistedSource } from './settings'
 import { useSettings } from './useSettings'
+
+const LEVEL_GAIN = 6
+export function normalizeLevel(rms: number): number {
+  return Math.max(0, Math.min(1, rms * LEVEL_GAIN))
+}
 
 // Sent to backend — matches Rust AudioSource enum serde
 export type AudioSource =
@@ -33,6 +39,16 @@ export function resolveSource(persisted: PersistedSource, live: AudioSources): A
 const armed = ref(false)
 const current = ref<PanelSelection | null>(null)
 const sources = ref<AudioSources>({ processes: [], inputDevices: [] })
+const level = ref(0)
+
+// Subscribe to backend capture-level events (emitted ~80ms while armed)
+;(async () => {
+  try {
+    await listen<number>('capture-level', (e) => { level.value = normalizeLevel(e.payload) })
+  } catch (e) {
+    console.warn('[useAudioSource] listen capture-level failed', e)
+  }
+})()
 
 async function refresh(): Promise<void> {
   try {
@@ -79,6 +95,7 @@ export function useAudioSource(): {
   armed: Readonly<Ref<boolean>>
   current: Readonly<Ref<PanelSelection | null>>
   sources: Ref<AudioSources>
+  level: Readonly<Ref<number>>
   refresh(): Promise<void>
   arm(sel: PanelSelection): Promise<void>
   disarm(): Promise<void>
@@ -87,6 +104,7 @@ export function useAudioSource(): {
     armed: readonly(armed),
     current: readonly(current),
     sources,
+    level: readonly(level),
     refresh,
     arm,
     disarm,

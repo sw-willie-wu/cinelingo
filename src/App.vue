@@ -21,14 +21,13 @@ import { useSettings } from './player/useSettings'
 import { useEngineProvision } from './player/useEngineProvision'
 import { setVideoBlur } from './mpv'
 import { usePasteUrl } from './player/usePasteUrl'
+import { useAudioSource } from './player/useAudioSource'
 import { useFloatingMode } from './player/useFloatingMode'
 import FloatingCaptions from './components/FloatingCaptions.vue'
+import AudioVisualizer from './components/AudioVisualizer.vue'
 import LoadingOverlay from './components/LoadingOverlay.vue'
 import * as playbackMemory from './player/playbackMemory'
 import logoUrl from './assets/cinelingo-logo.svg'
-
-// 空狀態：未載入任何來源、且非解析中 → 中央顯示品牌與提示。
-const showEmptyState = computed(() => !player.state.path && !player.source.resolving)
 
 const player = usePlayer()
 const queue = useQueue()
@@ -37,9 +36,13 @@ const windowControls = useWindowControls()
 const subs = useSubtitles()
 const settings = useSettings()
 const floating = useFloatingMode()
+const audioSource = useAudioSource()
 const normalMode = computed(() => !floating.active.value)  // 非浮動模式（正常播放器版面）
 useKeyboard()
 usePasteUrl()
+
+// 空狀態：未載入任何來源、非解析中、且未 armed（armed 時顯示 AudioVisualizer 取代）。
+const showEmptyState = computed(() => !player.state.path && !player.source.resolving && !audioSource.armed.value)
 
 // 換檔 → AI 字幕重啟(啟用中)或清舊 cue；套 per-video speed/audio-delay。
 watch(() => player.state.path, async () => {
@@ -78,7 +81,7 @@ onMounted(async () => {
       catch { player.notify('無法讀取拖入的項目'); return }
       if (paths.length === 0) { player.notify('沒有可播放的檔案'); return }
       const items: QueueItem[] = paths.map((p) => ({ kind: 'local', id: p, title: basename(p) }))
-      await queue.enqueueItems(items)                             // 空佇列→播第一支；非空→append
+      await queue.enqueueItems(items, { noAutoplay: useAudioSource().armed.value })  // armed→不自動播；否則空佇列→播第一支
     }
   })
 
@@ -134,6 +137,7 @@ function onOverlayPointerUp() { dragOrigin = null }
         <div class="es-title">Cinelingo</div>
         <div class="es-hint">拖曳影片或貼上網址以開始播放</div>
       </div>
+      <AudioVisualizer v-if="normalMode && player.isIdle.value && audioSource.armed.value" class="viz-center" />
       <SubtitleOverlay />
       <div v-if="dlText" class="dl-banner">{{ dlText }}</div>
       <Transition name="toast">
@@ -168,6 +172,7 @@ function onOverlayPointerUp() { dragOrigin = null }
 
 <style scoped>
 .overlay { width: 100vw; height: 100vh; position: relative; }
+.viz-center { position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none; z-index: 2; }
 .empty-state {
   position: absolute; inset: 0; z-index: 1; pointer-events: none;
   display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px;
