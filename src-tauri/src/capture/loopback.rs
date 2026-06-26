@@ -7,6 +7,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 
+use crate::capture::source::AudioSource;
+
 pub const TARGET_RATE: u32 = 16000;
 /// 能量門檻（型別 f32 配 tail_has_speech；實機 probe 可調）。
 pub const ENERGY_RMS_THRESH: f32 = 0.01;
@@ -112,14 +114,14 @@ pub fn list_input_devices() -> Result<Vec<AudioDevice>, String> {
 /// loopback 擷取啟動回傳：(停止旗標, 執行緒 handle, 16k mono f32 chunk receiver)。
 type CaptureSession = (Arc<AtomicBool>, std::thread::JoinHandle<()>, Receiver<Vec<f32>>);
 
-/// 啟動裝置 loopback 擷取執行緒。device_id None = 預設 render 裝置。
+/// 啟動音源擷取執行緒。
 /// 回 (stop_flag, JoinHandle, Receiver<16k mono f32 chunks>)。
-pub fn start_capture(device_id: Option<String>) -> Result<CaptureSession, String> {
+pub fn start_capture(source: AudioSource) -> Result<CaptureSession, String> {
     let (tx, rx): (Sender<Vec<f32>>, Receiver<Vec<f32>>) = channel();
     let stop = Arc::new(AtomicBool::new(false));
     let stop2 = stop.clone();
     let handle = std::thread::spawn(move || {
-        if let Err(e) = capture_loop(device_id, tx, &stop2) {
+        if let Err(e) = capture_loop(source, tx, &stop2) {
             eprintln!("[loopback] capture loop ended: {e}");
         }
     });
@@ -141,36 +143,86 @@ fn find_render_device_by_id(id: &str) -> Result<wasapi::Device, String> {
     Err(format!("找不到 render 裝置 id={id}"))
 }
 
+/// 依 id 找 capture（輸入）裝置（在已 COM-init 的執行緒內呼叫）。
+fn find_capture_device_by_id(id: &str) -> Result<wasapi::Device, String> {
+    let collection = wasapi::DeviceCollection::new(&wasapi::Direction::Capture)
+        .map_err(|e| e.to_string())?;
+    let count = collection.get_nbr_devices().map_err(|e| e.to_string())?;
+    for i in 0..count {
+        if let Ok(dev) = collection.get_device_at_index(i) {
+            if dev.get_id().ok().as_deref() == Some(id) {
+                return Ok(dev);
+            }
+        }
+    }
+    Err(format!("找不到 capture 裝置 id={id}"))
+}
+
+/// System loopback 初始化：render 裝置 + Direction::Capture + EventsShared
+/// → wasapi 內部自動帶 AUDCLNT_STREAMFLAGS_LOOPBACK（見 api.rs initialize_client）。
+fn init_loopback(ac: &mut wasapi::AudioClient, fmt: &wasapi::WaveFormat) -> Result<(), String> {
+    let (_def_time, min_time) = ac.get_device_period().map_err(|e| e.to_string())?;
+    let mode = wasapi::StreamMode::EventsShared {
+        autoconvert: true,
+        buffer_duration_hns: min_time,
+    };
+    ac.initialize_client(fmt, &wasapi::Direction::Capture, &mode)
+        .map_err(|e| e.to_string())
+}
+
+/// 依 source 取得 (IAudioClient, WaveFormat)。在已 COM-init 的執行緒內呼叫。
+fn open_client(source: &AudioSource) -> Result<(wasapi::AudioClient, wasapi::WaveFormat), String> {
+    match source {
+        AudioSource::System => {
+            let dev = wasapi::get_default_device(&wasapi::Direction::Render)
+                .map_err(|e| e.to_string())?;
+            let mut ac = dev.get_iaudioclient().map_err(|e| e.to_string())?;
+            let fmt = ac.get_mixformat().map_err(|e| e.to_string())?;
+            init_loopback(&mut ac, &fmt)?;
+            Ok((ac, fmt))
+        }
+        AudioSource::InputDevice { id } => {
+            let dev = find_capture_device_by_id(id)?;
+            let mut ac = dev.get_iaudioclient().map_err(|e| e.to_string())?;
+            let fmt = ac.get_mixformat().map_err(|e| e.to_string())?;
+            // 真·收音：Direction::Capture 一般模式（無 loopback flag）。
+            let (_def_time, min_time) = ac.get_device_period().map_err(|e| e.to_string())?;
+            let mode = wasapi::StreamMode::EventsShared {
+                autoconvert: true,
+                buffer_duration_hns: min_time,
+            };
+            ac.initialize_client(&fmt, &wasapi::Direction::Capture, &mode)
+                .map_err(|e| e.to_string())?;
+            Ok((ac, fmt))
+        }
+        AudioSource::Process { pid } => {
+            // 虛擬裝置不可 get_mixformat → 自帶固定格式 48k stereo f32。
+            let mut ac = wasapi::AudioClient::new_application_loopback_client(*pid, true)
+                .map_err(|e| e.to_string())?;
+            let fmt = wasapi::WaveFormat::new(32, 32, &wasapi::SampleType::Float, 48000, 2, None);
+            let mode = wasapi::StreamMode::EventsShared {
+                autoconvert: true,
+                buffer_duration_hns: 0,
+            };
+            ac.initialize_client(&fmt, &wasapi::Direction::Capture, &mode)
+                .map_err(|e| e.to_string())?;
+            Ok((ac, fmt))
+        }
+    }
+}
+
 fn capture_loop(
-    device_id: Option<String>,
+    source: AudioSource,
     tx: Sender<Vec<f32>>,
     stop: &AtomicBool,
 ) -> Result<(), String> {
     // COM (MTA)：此執行緒專用，與 Manager / tokio 完全隔離。
     let _ = wasapi::initialize_mta();
 
-    // 1. 取裝置（指定 id 或預設 render）。
-    let device = match &device_id {
-        Some(id) => find_render_device_by_id(id)?,
-        None => wasapi::get_default_device(&wasapi::Direction::Render).map_err(|e| e.to_string())?,
-    };
-
-    // 2. 開 IAudioClient，取 mix format（src_rate / channels）。
-    let mut audio_client = device.get_iaudioclient().map_err(|e| e.to_string())?;
-    let format = audio_client.get_mixformat().map_err(|e| e.to_string())?;
+    // 1-3. 依 source 取得 (IAudioClient, WaveFormat)，內含裝置選取與 initialize_client。
+    let (audio_client, format) = open_client(&source)?;
     let channels = format.get_nchannels() as usize;
     let src_rate = format.get_samplespersec();
-
-    // 3. 以 LOOPBACK 模式 initialize：render 裝置 + Direction::Capture + Shared
-    //    → wasapi 內部自動帶 AUDCLNT_STREAMFLAGS_LOOPBACK（見 api.rs initialize_client）。
-    let (_def_time, min_time) = audio_client.get_device_period().map_err(|e| e.to_string())?;
-    let mode = wasapi::StreamMode::EventsShared {
-        autoconvert: true,
-        buffer_duration_hns: min_time,
-    };
-    audio_client
-        .initialize_client(&format, &wasapi::Direction::Capture, &mode)
-        .map_err(|e| e.to_string())?;
 
     // 4. event handle + capture client，start_stream。
     let h_event = audio_client.set_get_eventhandle().map_err(|e| e.to_string())?;

@@ -246,7 +246,7 @@ pub async fn start(
     downloading: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
 ) -> Result<(), String> {
     let data = crate::data_dir(&app)?.join("subs");
-    let (stop, thread, rx) = loopback::start_capture(params.device_id.clone())?;
+    let (stop, thread, rx) = loopback::start_capture(crate::capture::source::AudioSource::System)?;
     let app2 = app.clone();
     let mgr2 = mgr.clone();
     {
