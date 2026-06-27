@@ -6,7 +6,8 @@ import { currentAudioFfIndex } from '../mpv'
 import { usePlayer } from './usePlayer'
 import { useSettings } from './useSettings'
 import { langToWhisper } from './langs'
-import { readTextFile, listSidecarSubs, loadSubMemory, saveSubMemory, type SidecarSub } from './backend'
+import { readTextFile, listSidecarSubs, loadSubMemory, saveSubMemory, startExternalTranscription, stopExternalTranscription, type SidecarSub } from './backend'
+import { useAudioSource } from './useAudioSource'
 import { normKey, trackToStored, restoreTrackSource, coerceStoredEntry, type StoredEntry } from './subMemory'
 import { clampSecondaryToPrimary as clampSec, pickCcRestore, type CcSnapshot } from './ccRestore'
 
@@ -82,6 +83,7 @@ function ensureWired(): Promise<void> {
       try { memory = (await loadSubMemory()) as Record<string, unknown> } catch { memory = {} }
       await listen<Cue>('sub-cue', (e) => {
         if (e.payload.sessionId !== sessionId.value) return
+        if (!liveNeeded.value) return  // CC 已關：拒絕後到的 cue，避免 race 黏畫面
         if (e.payload.status === 'interim') {
           liveInterim.value = e.payload.sourceText.trim() ? e.payload : null
         } else {
@@ -93,6 +95,7 @@ function ensureWired(): Promise<void> {
         }
       })
       await listen<Cue[]>('sub-cue-batch', (e) => {
+        if (!liveNeeded.value) return
         const seed = e.payload.filter((c) => c.sessionId === sessionId.value)
         if (seed.length) liveCues.value = upsertCues(liveCues.value, seed)
       })
@@ -113,10 +116,40 @@ function ensureWired(): Promise<void> {
       watch(() => [s.liveSubs.model, s.liveSubs.sourceLang] as const, () => {
         if (liveNeeded.value) startForCurrent().catch(() => {})
       })
-      // 任一軌進/離 live → 起/停轉寫
+      // 任一軌進/離 live → 起/停轉寫（startForCurrent 依 armed 狀態分派外部/影片路徑）
       watch(liveNeeded, (need) => {
         if (need) startForCurrent().catch(() => {})
-        else { startGen++; invoke('stop_transcription').catch(() => {}); liveCues.value = [] }
+        else {
+          startGen++
+          // armed 模式：stop_external_transcription 僅 set_transcribe(false)，保留 capture loop；
+          // 非 armed（影片）：stop_transcription = shutdown()，殺整個 session。
+          if (useAudioSource().armed.value) {
+            stopExternalTranscription().catch(() => {})
+            // noClock 不重置：arm 時 sub-session-reset 已設 noClock=true；start_external_transcription
+            // 不重發 reset，若此處清掉 false，重開 CC 後字幕走時間模式永遠顯示不出。
+          } else {
+            invoke('stop_transcription').catch(() => {})
+            noClock.value = false
+          }
+          liveCues.value = []
+          liveInterim.value = null
+        }
+      })
+      const audioSrc = useAudioSource()
+      // armed 解除 → live 軌關閉（觸發 stop）；armed 啟用 + liveNeeded 已開 → 主動重啟（避免先開 CC 再 arm 時無字幕）
+      watch(audioSrc.armed, (armed) => {
+        if (!armed) {
+          if (tracks.primary.source === 'live') tracks.primary.source = 'off'
+          if (tracks.secondary.source === 'live') tracks.secondary.source = 'off'
+        } else if (liveNeeded.value) {
+          startForCurrent().catch(() => {})
+        }
+      })
+      // 外部音源切換（已在轉寫中）→ 以新音源重啟
+      watch(audioSrc.current, (newSrc, oldSrc) => {
+        if (newSrc !== null && oldSrc !== null && liveNeeded.value) {
+          startForCurrent().catch(() => {})
+        }
       })
     })()
   }
@@ -134,6 +167,7 @@ async function resolveFfIndex(): Promise<number | null> {
 }
 
 // 呼叫當下自種 model + lang + prompt（取代舊 enable() 的 seeding）。
+// armed + 無影片 → 外部轉寫；否則走影片路徑。
 async function startForCurrent(): Promise<void> {
   const gen = ++startGen
   const player = usePlayer()
@@ -152,6 +186,23 @@ async function startForCurrent(): Promise<void> {
     cacheKeyLang: s.liveSubs.sourceLang,
     vadThreshold: s.liveSubs.vad.threshold,
     vadMinSilenceMs: s.liveSubs.vad.minSilenceMs,
+  }
+  // 外部音源模式：armed 且無影片（有影片時優先走影片路徑）
+  if (useAudioSource().armed.value && !src) {
+    if (!lang.value) {
+      player.notify('請先在設定→即時字幕將來源語言設為明確語言')
+      tracks.primary.source = 'off'  // 還原，避免 CC 顯示開但無轉寫
+      return
+    }
+    if (gen !== startGen) return
+    await startExternalTranscription(
+      model.value,
+      lang.value,
+      promptText.value ?? '',
+      s.liveSubs.vad.threshold,
+      s.liveSubs.vad.minSilenceMs,
+    )
+    return
   }
   if (src?.kind === 'remote') {
     // 遠端(YT)：優先從 audio-only 軌抽音訊（不限速）；無則退 muxed playback_url（後端 decode_remote_audio）。跳過 resolveFfIndex；

@@ -1,16 +1,23 @@
 <script setup lang="ts">
-import { ref } from 'vue'
 import { useAudioSource } from '../player/useAudioSource'
 import PlayerIcon from './PlayerIcon.vue'
-import AudioSourcePanel from './AudioSourcePanel.vue'
 
 defineProps<{ disabled?: boolean }>()
 
 const a = useAudioSource()
-const open = ref(false)
 
-function toggle() {
-  open.value = !open.value
+async function toggle() {
+  if (a.armed.value) { void a.disarm(); return }
+  const prev = a.current.value
+  if (!prev) { void a.arm({ kind: 'system' }); return }
+  // process pid 可能已更新 → 重查清單後再 arm
+  if (prev.kind === 'process') {
+    await a.refresh()
+    const found = a.sources.value.processes.find((p) => p.name === prev.name)
+    void a.arm(found ? { kind: 'process', name: found.name, pid: found.pid } : { kind: 'system' })
+    return
+  }
+  void a.arm(prev)
 }
 </script>
 
@@ -20,14 +27,13 @@ function toggle() {
       class="btn"
       :class="{ armed: a.armed.value }"
       :disabled="disabled"
-      aria-label="選擇音源"
-      title="選擇音源"
+      aria-label="外部音源"
+      title="外部音源（調整面板可切換）"
       @click="toggle"
     >
       <PlayerIcon name="mic" />
       <span v-if="a.armed.value" class="breath" />
     </button>
-    <AudioSourcePanel v-if="open" @close="open = false" />
   </div>
 </template>
 

@@ -54,7 +54,7 @@ const showAdjust = ref(false)
       <div class="group center">
         <button class="btn" aria-label="上一個" @click="queue.prev()"><PlayerIcon name="prev" /></button>
         <button class="btn" aria-label="後退5秒" @click="player.seekBy(-5)"><PlayerIcon name="back5" /></button>
-        <button class="btn stop-btn" :disabled="player.isIdle.value" aria-label="停止播放" title="停止播放（回首頁）" @click="player.closeMedia()">
+        <button class="btn stop-btn" aria-label="停止播放" title="停止播放（回首頁）" @click="!player.isIdle.value && player.closeMedia()">
           <span class="stop-sq" />
         </button>
         <button class="btn btn-play" :aria-label="player.state.pause === false ? '暫停' : '播放'" @click="player.togglePause()">
@@ -126,6 +126,5 @@ const showAdjust = ref(false)
 }
 .btn-play:hover { color: #fff; filter: drop-shadow(0 0 5px rgba(255, 255, 255, 0.8)) drop-shadow(0 0 15px rgba(255, 255, 255, 0.5)); }
 .btn-play:active { transform: scale(0.92); }
-.stop-btn:disabled { opacity: 0.35; cursor: default; }
 .stop-sq { width: 13px; height: 13px; border-radius: 2px; background: currentColor; display: block; }
 </style>

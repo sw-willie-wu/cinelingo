@@ -1,11 +1,8 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed } from 'vue'
 import { useSubtitles, ccMode } from '../player/useSubtitles'
 import { usePlayer } from '../player/usePlayer'
 import { useAudioSource } from '../player/useAudioSource'
-import { useSettings } from '../player/useSettings'
-import { langToWhisper } from '../player/langs'
-import { startExternalTranscription, stopExternalTranscription } from '../player/backend'
 import PlayerIcon from './PlayerIcon.vue'
 
 const subs = useSubtitles()
@@ -13,44 +10,17 @@ const player = usePlayer()
 const audioSource = useAudioSource()
 
 const active = computed(() => subs.ccActive.value)
-const transcribeOn = ref(false)
-
-const mode = computed(() =>
-  ccMode(!player.isIdle.value, audioSource.armed.value)
-)
-
-async function onCcExternal() {
-  const s = useSettings().state
-  if (transcribeOn.value) {
-    await stopExternalTranscription()
-    transcribeOn.value = false
-    return
-  }
-  const { lang, prompt } = langToWhisper(s.liveSubs.sourceLang)
-  if (!lang) {
-    player.notify('請先在設定→即時字幕將來源語言設為明確語言')
-    return
-  }
-  await startExternalTranscription(
-    s.liveSubs.model,
-    lang,
-    prompt ?? '',
-    s.liveSubs.vad.threshold,
-    s.liveSubs.vad.minSilenceMs,
-  )
-  transcribeOn.value = true
-}
+const mode = computed(() => ccMode(!player.isIdle.value, audioSource.armed.value))
 
 function handleClick() {
-  if (mode.value === 'file') subs.toggleCc()
-  else if (mode.value === 'external') onCcExternal()
+  if (mode.value !== 'disabled') subs.toggleCc()
 }
 </script>
 <template>
   <div class="sub-controls">
     <button
       class="btn"
-      :class="{ on: active || transcribeOn }"
+      :class="{ on: active }"
       :disabled="mode === 'disabled'"
       aria-label="顯示/隱藏字幕"
       title="顯示/隱藏字幕"

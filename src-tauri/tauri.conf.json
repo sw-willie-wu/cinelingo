@@ -14,8 +14,8 @@
       {
         "label": "main",
         "title": "Cinelingo",
-        "width": 1000,
-        "height": 600,
+        "width": 1024,
+        "height": 768,
         "decorations": false,
         "transparent": true
       }

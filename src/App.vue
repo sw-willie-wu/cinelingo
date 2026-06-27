@@ -137,7 +137,9 @@ function onOverlayPointerUp() { dragOrigin = null }
         <div class="es-title">Cinelingo</div>
         <div class="es-hint">拖曳影片或貼上網址以開始播放</div>
       </div>
-      <AudioVisualizer v-if="normalMode && player.isIdle.value && audioSource.armed.value" class="viz-center" />
+      <div v-if="normalMode && player.isIdle.value && audioSource.armed.value" class="viz-center">
+        <AudioVisualizer />
+      </div>
       <SubtitleOverlay />
       <div v-if="dlText" class="dl-banner">{{ dlText }}</div>
       <Transition name="toast">

@@ -9,9 +9,9 @@ const a = useAudioSource()
   </div>
 </template>
 <style scoped>
-.viz { position: relative; width: 160px; height: 160px; display: grid; place-items: center; }
+.viz { position: relative; width: 260px; height: 260px; display: grid; place-items: center; }
 .core { width: 64px; height: 64px; border-radius: 50%; background: var(--accent); transition: transform .08s linear, opacity .08s linear; }
 .ripple { position: absolute; width: 64px; height: 64px; border-radius: 50%; border: 2px solid var(--accent); opacity: 0; animation: ripple 2.4s ease-out infinite; }
 .ripple.r2 { animation-delay: 1.2s; }
-@keyframes ripple { 0% { transform: scale(1); opacity: .5 } 100% { transform: scale(2.6); opacity: 0 } }
+@keyframes ripple { 0% { transform: scale(1); opacity: .5 } 100% { transform: scale(3.8); opacity: 0 } }
 </style>
