@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onMounted } from 'vue'
 import { useAudioSource } from '../../player/useAudioSource'
+import PlayerIcon from '../PlayerIcon.vue'
 
 const emit = defineEmits<{ back: [] }>()
 const a = useAudioSource()
@@ -31,7 +32,7 @@ function pick(sel: Parameters<typeof a.arm>[0]) {
       :class="{ sel: a.armed.value && a.current.value?.kind === 'system' }"
       @click="pick({ kind: 'system' })"
     >
-      <span class="ic">🔊</span>系統輸出（全部聲音）
+      <span class="ic"><PlayerIcon name="volume" :size="18" /></span>系統輸出（全部聲音）
     </li>
   </ul>
 
@@ -45,7 +46,7 @@ function pick(sel: Parameters<typeof a.arm>[0]) {
         :class="{ sel: a.armed.value && a.current.value?.kind === 'process' && a.current.value.name === p.name }"
         @click="pick({ kind: 'process', name: p.name, pid: p.pid })"
       >
-        <span class="ic">🖥</span>{{ p.name }}
+        <span class="ic"><PlayerIcon name="grid" :size="18" /></span>{{ p.name }}
       </li>
     </ul>
   </template>
@@ -60,7 +61,7 @@ function pick(sel: Parameters<typeof a.arm>[0]) {
         :class="{ sel: a.armed.value && a.current.value?.kind === 'inputDevice' && a.current.value.id === d.id }"
         @click="pick({ kind: 'inputDevice', id: d.id })"
       >
-        <span class="ic">🎙</span>{{ d.name }}
+        <span class="ic"><PlayerIcon name="mic" :size="18" /></span>{{ d.name }}
       </li>
     </ul>
   </template>
@@ -94,5 +95,5 @@ function pick(sel: Parameters<typeof a.arm>[0]) {
 .src { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 9px; cursor: pointer; border: 1px solid transparent; }
 .src:hover { background: rgba(255,255,255,0.06); }
 .src.sel { background: rgba(var(--accent-rgb),0.16); border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
-.ic { font-size: 14px; flex-shrink: 0; }
+.ic { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; color: #cfd2db; }
 </style>
