@@ -19,7 +19,7 @@ export type IconName =
   | 'more'
   | 'mic'
   | 'speed' | 'quality' | 'image' | 'normalize' | 'audiodelay'
-  | 'home'
+  | 'home' | 'stop'
 
 withDefaults(defineProps<{ name: IconName; size?: number }>(), { size: 20 })
 </script>
@@ -219,6 +219,11 @@ withDefaults(defineProps<{ name: IconName; size?: number }>(), { size: 20 })
     <line x1="10" y1="4.5" x2="10" y2="19.5" />
     <line x1="15" y1="7" x2="15" y2="17" />
     <line x1="20" y1="10.5" x2="20" y2="13.5" />
+  </svg>
+
+  <!-- stop（圓角方塊：停止播放） -->
+  <svg v-else-if="name === 'stop'" :width="size" :height="size" viewBox="0 0 24 24" fill="currentColor">
+    <rect x="6" y="6" width="12" height="12" rx="2.5" />
   </svg>
 
   <!-- home（房子：關閉影片回首頁） -->

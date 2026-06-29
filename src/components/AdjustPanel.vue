@@ -57,12 +57,16 @@ function trackLabel(track: 'primary' | 'secondary'): string {
 
 function go(s: Screen) { screen.value = s }
 function close() { screen.value = 'root'; emit('close') }
+function stopPlayback() { void player.closeMedia(); close() }
 </script>
 
 <template>
   <div v-if="open" class="sm-pop" @click.self="close">
     <div class="sm-menu" @click.stop>
       <template v-if="screen === 'root'">
+        <div class="item action" :class="{ disabled: player.isIdle.value }" @click="!player.isIdle.value && stopPlayback()">
+          <span class="ic"><PlayerIcon name="stop" :size="18" /></span><span class="nm">停止播放</span>
+        </div>
         <div class="sec">播放</div>
         <div class="item" @click="go('speed')"><span class="ic"><PlayerIcon name="speed" :size="18" /></span><span class="nm">播放速度</span><span class="cur">{{ speed }}×</span><span class="gt">›</span></div>
         <div class="item" :class="{ disabled: !isRemote }" @click="isRemote && go('quality')"><span class="ic"><PlayerIcon name="quality" :size="18" /></span><span class="nm">畫質</span><span class="cur">{{ isRemote ? qualityLabel : '僅串流影片' }}</span><span class="gt">›</span></div>
