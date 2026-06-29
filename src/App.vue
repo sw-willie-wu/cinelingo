@@ -27,7 +27,7 @@ import FloatingCaptions from './components/FloatingCaptions.vue'
 import AudioVisualizer from './components/AudioVisualizer.vue'
 import LoadingOverlay from './components/LoadingOverlay.vue'
 import * as playbackMemory from './player/playbackMemory'
-import logoUrl from './assets/cinelingo-logo.svg'
+import wordmarkUrl from './assets/cinelingo-wordmark.png'
 
 const player = usePlayer()
 const queue = useQueue()
@@ -124,7 +124,7 @@ function onOverlayPointerUp() { dragOrigin = null }
 <template>
   <div
     class="overlay"
-    :class="{ 'cursor-hidden': !visible && normalMode, floating: !normalMode }"
+    :class="{ 'cursor-hidden': !visible && normalMode, floating: !normalMode, 'home-solid': normalMode && player.isIdle.value }"
     @dblclick.self="normalMode && player.toggleFullscreen()"
     @pointerdown="onOverlayPointerDown"
     @pointermove="onOverlayPointerMove"
@@ -133,8 +133,7 @@ function onOverlayPointerUp() { dragOrigin = null }
     <template v-if="normalMode">
       <ResizeHandles />
       <div v-if="showEmptyState" class="empty-state">
-        <img :src="logoUrl" class="es-logo" alt="" />
-        <div class="es-title">Cinelingo</div>
+        <img :src="wordmarkUrl" class="es-wordmark" alt="Cinelingo" />
         <div class="es-hint">拖曳影片或貼上網址以開始播放</div>
       </div>
       <div v-if="normalMode && player.isIdle.value && audioSource.armed.value" class="viz-center">
@@ -174,14 +173,22 @@ function onOverlayPointerUp() { dragOrigin = null }
 
 <style scoped>
 .overlay { width: 100vw; height: 100vh; position: relative; }
+/* 首頁(idle)沒有影片要透出來 → webview 自己畫不透明底,
+   避免透明窗在拖曳/reload 後穿透看到桌面（mpv idle 不重繪）。載入影片後移除此 class 恢復透明。
+   上層光暈跟隨主色 var(--accent-rgb)；底層深色漸層為不透明,確保整塊不透明。 */
+.overlay.home-solid {
+  background:
+    radial-gradient(54% 60% at 68% 30%, rgba(var(--accent-rgb), 0.14), transparent 64%),
+    radial-gradient(135% 110% at 52% 6%, #16222e 0%, #0a121a 48%, #05080c 100%);
+}
 .viz-center { position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none; z-index: 2; }
 .empty-state {
   position: absolute; inset: 0; z-index: 1; pointer-events: none;
-  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px;
   user-select: none;
 }
-.empty-state .es-logo { width: 96px; height: 96px; opacity: 0.92; filter: drop-shadow(0 6px 18px rgba(0,0,0,0.45)); }
-.empty-state .es-title { font-size: 26px; font-weight: 600; letter-spacing: 0.5px; color: #e8e8ea; }
+/* 固定尺寸（不用 max-width %）→ logo 不隨視窗縮放變大變小；拉伸閃爍由手動縮放(ResizeHandles)解決。 */
+.empty-state .es-wordmark { width: 340px; height: auto; opacity: 0.95; filter: drop-shadow(0 6px 22px rgba(0,0,0,0.5)); }
 .empty-state .es-hint { font-size: 13px; color: #8a8d99; }
 .url-toast { position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%); z-index: 8;
   background: rgba(20,20,24,0.85); color: #e8e8ea; padding: 10px 18px; border-radius: 10px;
