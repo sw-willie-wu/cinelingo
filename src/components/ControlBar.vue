@@ -38,51 +38,61 @@ const timeText = computed(() => {
 })
 const showQueue = ref(false)
 const showAdjust = ref(false)
+// 只有「真的在播」(非 idle 且未暫停)才顯示暫停 icon；idle(含停止後 pause 仍為 false)一律顯示播放。
+const isPlaying = computed(() => !player.isIdle.value && player.state.pause === false)
 </script>
 
 <template>
   <div class="control-bar">
     <SeekBar v-if="player.state.path" />
     <div class="osc-row">
-      <!-- 左:音量 + 時間 -->
+      <!-- 左:音量 + 時間（慣例上左側較輕，平衡靠分群與留白而非等量） -->
       <div class="group left">
         <VolumeControl />
         <span v-if="player.state.path" class="time">{{ timeText }}</span>
       </div>
 
-      <!-- 中:prev / 後退5 / 停止 / 播放 / 前進5 / next(絕對置中) -->
+      <!-- 中:prev / 後退5 / 播放 / 前進5 / next(絕對置中、純傳輸) -->
       <div class="group center">
         <button class="btn" aria-label="上一個" @click="queue.prev()"><PlayerIcon name="prev" /></button>
         <button class="btn" aria-label="後退5秒" @click="player.seekBy(-5)"><PlayerIcon name="back5" /></button>
-        <button class="btn stop-btn" aria-label="停止播放" title="停止播放（回首頁）" @click="!player.isIdle.value && player.closeMedia()">
-          <span class="stop-sq" />
-        </button>
-        <button class="btn btn-play" :aria-label="player.state.pause === false ? '暫停' : '播放'" @click="player.togglePause()">
-          <PlayerIcon :name="player.state.pause === false ? 'pause' : 'play'" :size="22" />
+        <button class="btn btn-play" :aria-label="isPlaying ? '暫停' : '播放'" @click="player.togglePause()">
+          <PlayerIcon :name="isPlaying ? 'pause' : 'play'" :size="22" />
         </button>
         <button class="btn" aria-label="前進5秒" @click="player.seekBy(5)"><PlayerIcon name="forward5" /></button>
         <button class="btn" aria-label="下一個" @click="queue.next()"><PlayerIcon name="next" /></button>
       </div>
 
-      <!-- 右:AI 字幕 / 浮動字幕 / 待播清單 / 釘選最上層 / 全螢幕 -->
+      <!-- 右:字幕/AI 藥丸 + 置頂藥丸 + 全螢幕 + 清單 + 更多 -->
       <div class="group right">
-        <SubtitleControls />
-        <button class="btn adjust-btn" aria-label="調整" title="調整" @click="showAdjust = !showAdjust">
-          <PlayerIcon name="adjust" />
-          <span v-if="qualityBadge" class="q-badge">{{ qualityBadge }}</span>
-        </button>
-        <MicButton :disabled="!player.isIdle.value" />
-        <button class="btn" aria-label="浮動字幕" title="浮動字幕（疊在其他視窗上）" @click="floating.enter()">
-          <PlayerIcon name="floating-subs" />
-        </button>
+        <!-- 字幕/AI:CC + 外部音源 -->
+        <div class="pill" role="group" aria-label="字幕與音訊">
+          <SubtitleControls />
+          <MicButton />
+        </div>
+
+        <!-- 視窗/檢視:浮動字幕 + 釘選最上層 + 全螢幕 -->
+        <div class="pill" role="group" aria-label="視窗與檢視">
+          <button class="btn" aria-label="浮動字幕" title="浮動字幕（疊在其他視窗上）" @click="floating.enter()">
+            <PlayerIcon name="floating-subs" />
+          </button>
+          <button class="btn" :class="{ on: alwaysOnTop }" aria-label="釘選最上層" title="釘選最上層" @click="toggleAlwaysOnTop()">
+            <PlayerIcon name="pip" />
+          </button>
+          <button class="btn" :aria-label="player.state.fullscreen ? '退出全螢幕' : '全螢幕'" @click="player.toggleFullscreen()">
+            <PlayerIcon :name="player.state.fullscreen ? 'fullscreen-exit' : 'fullscreen'" />
+          </button>
+        </div>
+
+        <!-- 待播清單:放在更多左邊（側欄從右側展開） -->
         <button class="btn" :class="{ on: queue.items.length > 1 }" aria-label="待播清單" title="待播清單" @click="showQueue = !showQueue">
           <PlayerIcon name="playlist" />
         </button>
-        <button class="btn" :class="{ on: alwaysOnTop }" aria-label="釘選最上層" @click="toggleAlwaysOnTop()">
-          <PlayerIcon name="pip" />
-        </button>
-        <button class="btn" :aria-label="player.state.fullscreen ? '退出全螢幕' : '全螢幕'" @click="player.toggleFullscreen()">
-          <PlayerIcon :name="player.state.fullscreen ? 'fullscreen-exit' : 'fullscreen'" />
+
+        <!-- 更多/調整:popover 固定從右下角彈出,放最右與其對齊 -->
+        <button class="btn adjust-btn" aria-label="更多設定" title="更多設定" @click="showAdjust = !showAdjust">
+          <PlayerIcon name="more" />
+          <span v-if="qualityBadge" class="q-badge">{{ qualityBadge }}</span>
         </button>
       </div>
     </div>
@@ -102,7 +112,17 @@ const showAdjust = ref(false)
   min-height: 46px;
 }
 .group { display: flex; align-items: center; gap: 5px; }
-.time { color: #fff; font: 12px/1 sans-serif; white-space: nowrap; user-select: none; margin-left: 12px; }
+/* 右群組:藥丸之間留較大間距,讓眼睛把每個藥丸讀成一個群 */
+.group.right { gap: 8px; }
+/* segmented toggle group:共用背景圈出「相關功能成一團」
+   上下也要留 padding,否則滿高按鈕會蓋掉填色、框就看不出來 */
+.pill {
+  display: flex; align-items: center; gap: 2px;
+  padding: 1px 4px;
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+}
+.time { color: #fff; font: 12px/1 var(--font); white-space: nowrap; user-select: none; margin-left: 12px; }
 .center {
   position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); gap: 6px;
 }
@@ -118,7 +138,7 @@ const showAdjust = ref(false)
 .q-badge {
   position: absolute; top: 4px; right: 0; min-width: 14px; height: 13px; padding: 0 3px;
   display: flex; align-items: center; justify-content: center;
-  background: var(--accent); color: #fff; font: 700 8px/1 sans-serif; letter-spacing: .2px;
+  background: var(--accent); color: #fff; font: 700 8px/1 var(--font); letter-spacing: .2px;
   border-radius: 7px; pointer-events: none;
 }
 .btn-play {
@@ -126,5 +146,4 @@ const showAdjust = ref(false)
 }
 .btn-play:hover { color: #fff; filter: drop-shadow(0 0 5px rgba(255, 255, 255, 0.8)) drop-shadow(0 0 15px rgba(255, 255, 255, 0.5)); }
 .btn-play:active { transform: scale(0.92); }
-.stop-sq { width: 13px; height: 13px; border-radius: 2px; background: currentColor; display: block; }
 </style>
