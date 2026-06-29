@@ -26,6 +26,7 @@ pub fn merge_segments(session_id: &str, lang: Option<&str>, window_start: f64, s
             source_text: text,
             lang: lang.map(|s| s.to_string()),
             status: "final".into(),
+            ..Default::default()
         });
     }
     out
