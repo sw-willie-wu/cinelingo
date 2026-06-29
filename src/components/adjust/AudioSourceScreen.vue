@@ -46,7 +46,10 @@ function pick(sel: Parameters<typeof a.arm>[0]) {
         :class="{ sel: a.armed.value && a.current.value?.kind === 'process' && a.current.value.name === p.name }"
         @click="pick({ kind: 'process', name: p.name, pid: p.pid })"
       >
-        <span class="ic"><PlayerIcon name="grid" :size="18" /></span>{{ p.name }}
+        <span class="ic">
+          <img v-if="p.icon" :src="p.icon" class="app-icon" alt="" />
+          <PlayerIcon v-else name="grid" :size="18" />
+        </span>{{ p.name }}
       </li>
     </ul>
   </template>
@@ -95,5 +98,6 @@ function pick(sel: Parameters<typeof a.arm>[0]) {
 .src { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 9px; cursor: pointer; border: 1px solid transparent; }
 .src:hover { background: rgba(255,255,255,0.06); }
 .src.sel { background: rgba(var(--accent-rgb),0.16); border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
-.ic { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; color: #cfd2db; }
+.ic { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; color: #cfd2db; width: 18px; height: 18px; }
+.app-icon { width: 18px; height: 18px; object-fit: contain; }
 </style>

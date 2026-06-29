@@ -49,7 +49,7 @@ export const saveRecent = (data: unknown) => invoke<void>('save_recent', { data 
 export const expandPlayablePaths = (paths: string[]) => invoke<string[]>('expand_playable_paths', { paths })
 export const pathExists = (path: string) => invoke<boolean>('path_exists', { path })
 
-export interface ProcessSource { pid: number; name: string }
+export interface ProcessSource { pid: number; name: string; icon?: string }
 export interface InputDevice { id: string; name: string; isDefault: boolean }
 export interface AudioSources { processes: ProcessSource[]; inputDevices: InputDevice[] }
 export const listAudioSources = () => invoke<AudioSources>('list_audio_sources')
