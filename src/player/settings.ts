@@ -17,7 +17,7 @@ export interface ImageAdjust { brightness: number; contrast: number; saturation:
 export interface EqState { enabled: boolean; preset: string; bands: number[] } // bands 長度 10
 export interface Settings {
   version: number
-  liveSubs: { enabled: boolean; model: ModelKey; sourceLang: string; saveSrt: boolean; overwriteOnParamChange: boolean; vad: { threshold: number; minSilenceMs: number }; display: { lines: number }; audioSource: PersistedSource | null }
+  liveSubs: { enabled: boolean; model: ModelKey; sourceLang: string; saveSrt: boolean; overwriteOnParamChange: boolean; vad: { threshold: number; minSilenceMs: number }; display: { lines: number }; audioSource: PersistedSource | null; translateEnabled: boolean; translateTo: string }
   hardware: { accelEnabled: boolean | null }
   appearance: { maxWidthPct: number; primary: SubStyle; secondary: SubStyle }
   ui: { language: string }
@@ -40,7 +40,7 @@ const VIDEO_OUTPUTS: VideoOutput[] = ['gpu', 'gpu-next']
 export function defaultSettings(): Settings {
   return {
     version: SETTINGS_VERSION,
-    liveSubs: { enabled: false, model: 'turbo', sourceLang: 'auto', saveSrt: true, overwriteOnParamChange: false, vad: { threshold: 0.5, minSilenceMs: 100 }, display: { lines: 3 }, audioSource: null },
+    liveSubs: { enabled: false, model: 'turbo', sourceLang: 'auto', saveSrt: true, overwriteOnParamChange: false, vad: { threshold: 0.5, minSilenceMs: 100 }, display: { lines: 3 }, audioSource: null, translateEnabled: false, translateTo: 'zh-Hant' },
     hardware: { accelEnabled: null },
     appearance: {
       maxWidthPct: 80,
@@ -121,6 +121,12 @@ export function mergeSettings(raw: unknown): Settings {
         }
       })(),
       audioSource: persistedSource(ls.audioSource),
+      translateEnabled: bool(ls.translateEnabled, d.liveSubs.translateEnabled),
+      // 目標語言須為明確語言（排除 'auto'）；非法 → 預設 zh-Hant
+      translateTo: (() => {
+        const v = str(ls.translateTo, d.liveSubs.translateTo)
+        return v !== 'auto' && LANG_VALUES.includes(v) ? v : d.liveSubs.translateTo
+      })(),
     },
     hardware: { accelEnabled: typeof hw.accelEnabled === 'boolean' ? hw.accelEnabled : null },
     appearance: {

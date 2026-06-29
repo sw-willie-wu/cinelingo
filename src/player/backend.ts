@@ -56,12 +56,18 @@ export const listAudioSources = () => invoke<AudioSources>('list_audio_sources')
 export const armAudioSource = (source: import('./useAudioSource').AudioSource, recordName?: string | null) =>
   invoke<void>('arm_audio_source', { source, recordName: recordName ?? null })
 export const disarmAudioSource = () => invoke<void>('disarm_audio_source')
-export const startExternalTranscription = (
+export function startExternalTranscription(
   model: string,
   sourceLang: string,
   prompt: string,
   vadThreshold: number,
   vadMinSilenceMs: number,
-) => invoke<void>('start_external_transcription', { model, sourceLang, prompt, vadThreshold, vadMinSilenceMs })
+  targetLang?: string,
+): Promise<void> {
+  return invoke('start_external_transcription', { model, sourceLang, prompt, vadThreshold, vadMinSilenceMs, targetLang: targetLang ?? null })
+}
+export const translateEngineReady = (): Promise<boolean> => invoke('translate_engine_ready')
+export const checkTranslateEngine = (): Promise<{ kind: string; sizeMb: number }[]> => invoke('check_translate_engine')
+export const provisionTranslateEngine = (): Promise<void> => invoke('provision_translate_engine')
 export const stopExternalTranscription = () => invoke<void>('stop_external_transcription')
 
