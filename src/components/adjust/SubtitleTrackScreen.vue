@@ -49,6 +49,13 @@ async function addFile() {
   <ul class="srcs">
     <li
       class="src"
+      :class="{ sel: cur.source === 'off' }"
+      @click="subs.selectSource(props.track, 'off')"
+    >
+      <span>關閉字幕</span>
+    </li>
+    <li
+      class="src"
       :class="{ sel: cur.source === 'live', disabled: !masterOn }"
       @click="masterOn && subs.selectSource(props.track, 'live')"
     >
@@ -63,13 +70,6 @@ async function addFile() {
       @click="subs.selectSource(props.track, f.id)"
     >
       <span class="fname">{{ f.name }}</span>
-    </li>
-    <li
-      class="src"
-      :class="{ sel: cur.source === 'off' }"
-      @click="subs.selectSource(props.track, 'off')"
-    >
-      <span>關閉字幕</span>
     </li>
   </ul>
 

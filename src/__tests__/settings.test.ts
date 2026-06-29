@@ -79,10 +79,11 @@ describe('settings defaults + merge', () => {
       .toEqual({ threshold: 0.5, minSilenceMs: 100 })
   })
   it('capture defaults + merge', () => {
-    expect(defaultSettings().capture).toEqual({ enabled: false })
-    expect(mergeSettings({}).capture).toEqual({ enabled: false })
+    expect(defaultSettings().capture).toEqual({ enabled: false, recordAudio: false })
+    expect(mergeSettings({}).capture).toEqual({ enabled: false, recordAudio: false })
     expect(mergeSettings({ capture: { enabled: true } }).capture.enabled).toBe(true)
     expect(mergeSettings({ capture: { enabled: 'x' } } as any).capture.enabled).toBe(false)
+    expect(mergeSettings({ capture: { recordAudio: true } } as any).capture.recordAudio).toBe(true)
   })
   it('maxWidthPct: default 80, lives on appearance', () => {
     expect(defaultSettings().appearance.maxWidthPct).toBe(80)
@@ -139,6 +140,10 @@ describe('settings defaults + merge', () => {
     const m = mergeSettings({})
     expect(m.video.saturation).toBe(0)
     expect(m.audio.eq.bands.length).toBe(10)
+  })
+  it('audioSource defaults null on legacy', () => {
+    const merged = mergeSettings({ liveSubs: { model: 'turbo' } } as any)
+    expect(merged.liveSubs.audioSource).toBeNull()
   })
 })
 

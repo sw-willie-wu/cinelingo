@@ -16,6 +16,7 @@ pub mod stream;
 use serde::Serialize;
 use std::collections::HashSet;
 use std::sync::Arc;
+use tauri::Emitter;
 use tokio::sync::Mutex;
 
 #[derive(Default)]
@@ -187,25 +188,61 @@ pub async fn stop_transcription(state: tauri::State<'_, SubsState>) -> Result<()
     Ok(())
 }
 
+// ── arm / transcribe 拆分指令（T6）────────────────────────────────────────────
+
 #[tauri::command]
-#[allow(clippy::too_many_arguments)]
-pub async fn start_loopback_transcription(
+pub async fn arm_audio_source(
     app: tauri::AppHandle,
     state: tauri::State<'_, SubsState>,
-    device_id: Option<String>,
+    source: crate::capture::source::AudioSource,
+    record_name: Option<String>,   // Some → 錄製整段擷取音訊到 recordings/<name>
+) -> Result<(), String> {
+    let mgr = state.inner.clone();
+    let downloading = state.downloading.clone();
+    { let m = mgr.lock().await; m.set_transcribe(false); } // 確保 run_loop 以 drain-only 模式啟動
+    stream::start(app, mgr, source, downloading, record_name).await
+}
+
+#[tauri::command]
+pub async fn disarm_audio_source(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, SubsState>,
+) -> Result<(), String> {
+    let saved = {
+        let mut m = state.inner.lock().await;
+        m.set_transcribe(false);
+        m.stop_task_pub();        // abort run_loop + 停 capture thread（先停才無並發 append）
+        m.finalize_record()       // 收尾錄音（若有）→ 寫 WAV
+    };
+    if let Some(p) = saved {
+        app.emit("recording-saved", p.to_string_lossy().to_string()).ok();
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn start_external_transcription(
+    state: tauri::State<'_, SubsState>,
     model: String,
-    source_lang: String, // §4.7：前端保證 concrete（非 auto）
+    source_lang: String,
     prompt: String,
     vad_threshold: f64,
     vad_min_silence_ms: i64,
 ) -> Result<(), String> {
-    let params = stream::LoopbackParams { device_id, model, source_lang, prompt, vad_threshold, vad_min_silence_ms };
-    stream::start(app, state.inner.clone(), params, state.downloading.clone()).await
+    if source_lang == "auto" || source_lang.is_empty() {
+        return Err("即時辨識需指定明確語言（非自動）".into());
+    }
+    let m = state.inner.lock().await;
+    m.set_transcribe_params(session::TranscribeParams {
+        model, source_lang, prompt, vad_threshold, vad_min_silence_ms,
+    });
+    m.set_transcribe(true);
+    Ok(())
 }
 
 #[tauri::command]
-pub async fn stop_loopback_transcription(state: tauri::State<'_, SubsState>) -> Result<(), String> {
-    state.inner.lock().await.shutdown().await; // 停 task + capture thread + 殺 server + 掃暫存
+pub async fn stop_external_transcription(state: tauri::State<'_, SubsState>) -> Result<(), String> {
+    state.inner.lock().await.set_transcribe(false);
     Ok(())
 }
 
@@ -255,10 +292,12 @@ pub async fn remote_title(app: tauri::AppHandle, url: String) -> Result<Option<S
     Ok(remote::fetch_remote_title(&yt, &url).await)
 }
 
-/// 列出系統 render endpoints（供模式 C loopback 選音源）。COM 須在執行緒上跑 → spawn_blocking。
+/// 列出音訊程序來源與輸入裝置（供音源選擇 UI）。COM 須在執行緒上跑 → spawn_blocking。
 #[tauri::command]
 pub async fn list_audio_sources() -> Result<crate::capture::loopback::AudioSources, String> {
-    tauri::async_runtime::spawn_blocking(crate::capture::loopback::list_sources)
-        .await
-        .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(|| {
+        let processes = crate::capture::sessions::list_audio_processes().unwrap_or_default();
+        let input_devices = crate::capture::loopback::list_input_devices().unwrap_or_default();
+        Ok(crate::capture::loopback::AudioSources { processes, input_devices })
+    }).await.map_err(|e| e.to_string())?
 }

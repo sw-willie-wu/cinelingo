@@ -2,6 +2,8 @@
   /* 主題色（之後要改主色就改這裡；元件逐步改用 var(--accent) 即可一處生效） */
   --accent-rgb: 74, 163, 255;
   --accent: rgb(var(--accent-rgb));
+  /* 統一字型：Latin 走 Segoe UI、CJK 走微軟正黑體（成套）。不指定時英數/中文會各自 fallback 到不成套字型 → 看起來不一致。 */
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, "PingFang TC", "Microsoft JhengHei", "Noto Sans TC", sans-serif;
 }
 
 html, body, #app {
@@ -9,6 +11,8 @@ html, body, #app {
   margin: 0;
   height: 100%;
   overflow: hidden;
+  font-family: var(--font);
+  -webkit-font-smoothing: antialiased;
 }
 
 /* 自動隱藏:overlay 加此 class 時隱藏游標 */

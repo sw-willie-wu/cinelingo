@@ -214,6 +214,11 @@ export async function stopMpv(): Promise<void> {
   await destroy()
 }
 
+// 停止當前播放檔案（卸載、mpv 存活轉 idle）
+export async function stop(): Promise<void> {
+  await command('stop', [])
+}
+
 // 全 mpv 事件監聽（start-file / end-file / file-loaded ...）。usePlayer 用來驅動佇列自動下一支與最近記錄。
 export function onMpvEvent(cb: (e: MpvEvent) => void): Promise<() => void> {
   return listenEvents(cb)

@@ -1,7 +1,9 @@
 <script setup lang="ts">
-import { onMounted, onBeforeUnmount, watch, computed } from 'vue'
+import { onMounted, onBeforeUnmount, watch, computed, ref } from 'vue'
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
 import { invoke } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
+import { revealItemInDir } from '@tauri-apps/plugin-opener'
 import { usePlayer } from './player/usePlayer'
 import { useKeyboard } from './player/useKeyboard'
 import { useAutoHide } from './player/useAutoHide'
@@ -21,14 +23,13 @@ import { useSettings } from './player/useSettings'
 import { useEngineProvision } from './player/useEngineProvision'
 import { setVideoBlur } from './mpv'
 import { usePasteUrl } from './player/usePasteUrl'
+import { useAudioSource } from './player/useAudioSource'
 import { useFloatingMode } from './player/useFloatingMode'
 import FloatingCaptions from './components/FloatingCaptions.vue'
+import AudioVisualizer from './components/AudioVisualizer.vue'
 import LoadingOverlay from './components/LoadingOverlay.vue'
 import * as playbackMemory from './player/playbackMemory'
-import logoUrl from './assets/cinelingo-logo.svg'
-
-// 空狀態：未載入任何來源、且非解析中 → 中央顯示品牌與提示。
-const showEmptyState = computed(() => !player.state.path && !player.source.resolving)
+import wordmarkUrl from './assets/cinelingo-wordmark.png'
 
 const player = usePlayer()
 const queue = useQueue()
@@ -37,9 +38,13 @@ const windowControls = useWindowControls()
 const subs = useSubtitles()
 const settings = useSettings()
 const floating = useFloatingMode()
+const audioSource = useAudioSource()
 const normalMode = computed(() => !floating.active.value)  // 非浮動模式（正常播放器版面）
 useKeyboard()
 usePasteUrl()
+
+// 空狀態：未載入任何來源、非解析中、且未 armed（armed 時顯示 AudioVisualizer 取代）。
+const showEmptyState = computed(() => !player.state.path && !player.source.resolving && !audioSource.armed.value)
 
 // 換檔 → AI 字幕重啟(啟用中)或清舊 cue；套 per-video speed/audio-delay。
 watch(() => player.state.path, async () => {
@@ -64,6 +69,12 @@ const dlText = computed(() => {
 
 let unlistenDrop: (() => void) | null = null
 let unlistenClose: (() => void) | null = null
+let unlistenRec: (() => void) | null = null
+
+// 錄音存檔提示（點擊開啟資料夾）；後端 disarm/重 arm 時 emit recording-saved。
+const recordingSaved = ref<string | null>(null)
+let recTimer: ReturnType<typeof setTimeout> | undefined
+function openRecordingFolder() { if (recordingSaved.value) void revealItemInDir(recordingSaved.value) }
 
 onMounted(async () => {
   await player.start()
@@ -78,8 +89,14 @@ onMounted(async () => {
       catch { player.notify('無法讀取拖入的項目'); return }
       if (paths.length === 0) { player.notify('沒有可播放的檔案'); return }
       const items: QueueItem[] = paths.map((p) => ({ kind: 'local', id: p, title: basename(p) }))
-      await queue.enqueueItems(items)                             // 空佇列→播第一支；非空→append
+      await queue.enqueueItems(items, { noAutoplay: useAudioSource().armed.value })  // armed→不自動播；否則空佇列→播第一支
     }
+  })
+
+  unlistenRec = await listen<string>('recording-saved', (e) => {
+    recordingSaved.value = e.payload
+    clearTimeout(recTimer)
+    recTimer = setTimeout(() => { recordingSaved.value = null }, 6000)
   })
 
   unlistenClose = await win.onCloseRequested(async (event) => {
@@ -94,7 +111,7 @@ onMounted(async () => {
   })
 })
 
-onBeforeUnmount(() => { unlistenDrop?.(); unlistenClose?.() })
+onBeforeUnmount(() => { unlistenDrop?.(); unlistenClose?.(); unlistenRec?.() })
 
 // 左鍵按住拖曳超過 4px → 移動視窗(整個 overlay,不限 titlebar)。
 // 排除按鈕 / 進度條 / 音量條 / 縮放把手;單擊雙擊不誤觸(雙擊影片仍進全螢幕)。
@@ -121,7 +138,7 @@ function onOverlayPointerUp() { dragOrigin = null }
 <template>
   <div
     class="overlay"
-    :class="{ 'cursor-hidden': !visible && normalMode, floating: !normalMode }"
+    :class="{ 'cursor-hidden': !visible && normalMode, floating: !normalMode, 'home-solid': normalMode && player.isIdle.value }"
     @dblclick.self="normalMode && player.toggleFullscreen()"
     @pointerdown="onOverlayPointerDown"
     @pointermove="onOverlayPointerMove"
@@ -130,9 +147,11 @@ function onOverlayPointerUp() { dragOrigin = null }
     <template v-if="normalMode">
       <ResizeHandles />
       <div v-if="showEmptyState" class="empty-state">
-        <img :src="logoUrl" class="es-logo" alt="" />
-        <div class="es-title">Cinelingo</div>
+        <img :src="wordmarkUrl" class="es-wordmark" alt="Cinelingo" />
         <div class="es-hint">拖曳影片或貼上網址以開始播放</div>
+      </div>
+      <div v-if="normalMode && player.isIdle.value && audioSource.armed.value" class="viz-center">
+        <AudioVisualizer />
       </div>
       <SubtitleOverlay />
       <div v-if="dlText" class="dl-banner">{{ dlText }}</div>
@@ -141,6 +160,11 @@ function onOverlayPointerUp() { dragOrigin = null }
         <div v-else-if="player.source.loadError" class="url-toast err">{{ player.source.loadError }}</div>
       </Transition>
       <LoadingOverlay v-if="player.state.pausedForCache" :percent="player.state.cacheBufferingState ?? 0" />
+      <Transition name="rectoast">
+        <button v-if="recordingSaved" class="rec-toast" @click="openRecordingFolder">
+          🎙 已儲存錄音 · 點擊開啟資料夾
+        </button>
+      </Transition>
       <div class="scrim scrim-top" :class="{ hidden: !visible || settings.modal.open }"></div>
       <div class="scrim scrim-bottom" :class="{ hidden: !visible || settings.modal.open }"></div>
       <div
@@ -168,18 +192,37 @@ function onOverlayPointerUp() { dragOrigin = null }
 
 <style scoped>
 .overlay { width: 100vw; height: 100vh; position: relative; }
+/* 首頁(idle)沒有影片要透出來 → webview 自己畫不透明底,
+   避免透明窗在拖曳/reload 後穿透看到桌面（mpv idle 不重繪）。載入影片後移除此 class 恢復透明。
+   上層光暈跟隨主色 var(--accent-rgb)；底層深色漸層為不透明,確保整塊不透明。 */
+.overlay.home-solid {
+  background:
+    radial-gradient(54% 60% at 68% 30%, rgba(var(--accent-rgb), 0.14), transparent 64%),
+    radial-gradient(135% 110% at 52% 6%, #16222e 0%, #0a121a 48%, #05080c 100%);
+}
+.viz-center { position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none; z-index: 2; }
 .empty-state {
   position: absolute; inset: 0; z-index: 1; pointer-events: none;
-  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px;
   user-select: none;
 }
-.empty-state .es-logo { width: 96px; height: 96px; opacity: 0.92; filter: drop-shadow(0 6px 18px rgba(0,0,0,0.45)); }
-.empty-state .es-title { font-size: 26px; font-weight: 600; letter-spacing: 0.5px; color: #e8e8ea; }
+/* 固定尺寸（不用 max-width %）→ logo 不隨視窗縮放變大變小；拉伸閃爍由手動縮放(ResizeHandles)解決。 */
+.empty-state .es-wordmark { width: 340px; height: auto; opacity: 0.95; filter: drop-shadow(0 6px 22px rgba(0,0,0,0.5)); }
 .empty-state .es-hint { font-size: 13px; color: #8a8d99; }
 .url-toast { position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%); z-index: 8;
   background: rgba(20,20,24,0.85); color: #e8e8ea; padding: 10px 18px; border-radius: 10px;
   font-size: 13px; pointer-events: none; backdrop-filter: blur(8px); }
 .url-toast.err { color: #ff9a9a; }
+.rec-toast {
+  position: absolute; top: 48px; right: 14px; z-index: 9;
+  background: rgba(20,20,24,0.9); color: #e8e8ea; padding: 9px 16px; border-radius: 10px;
+  font: 13px var(--font); border: 1px solid rgba(255,255,255,0.14); cursor: pointer;
+  backdrop-filter: blur(8px); white-space: nowrap; box-shadow: 0 8px 24px rgba(0,0,0,.4);
+}
+.rec-toast:hover { background: rgba(36,36,42,0.95); color: #fff; }
+/* 右上彈出：由右滑入 + 淡入 */
+.rectoast-enter-active, .rectoast-leave-active { transition: opacity .25s ease, transform .25s cubic-bezier(.4,0,.2,1); }
+.rectoast-enter-from, .rectoast-leave-to { opacity: 0; transform: translateX(16px); }
 .toast-enter-active, .toast-leave-active { transition: opacity 0.4s ease; }
 .toast-enter-from, .toast-leave-to { opacity: 0; }
 .dl-banner {

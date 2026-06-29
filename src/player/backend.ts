@@ -49,16 +49,19 @@ export const saveRecent = (data: unknown) => invoke<void>('save_recent', { data 
 export const expandPlayablePaths = (paths: string[]) => invoke<string[]>('expand_playable_paths', { paths })
 export const pathExists = (path: string) => invoke<boolean>('path_exists', { path })
 
-export interface AudioDevice { id: string; name: string; isDefault: boolean }
-export interface AudioSources { devices: AudioDevice[] }
+export interface ProcessSource { pid: number; name: string; icon?: string }
+export interface InputDevice { id: string; name: string; isDefault: boolean }
+export interface AudioSources { processes: ProcessSource[]; inputDevices: InputDevice[] }
 export const listAudioSources = () => invoke<AudioSources>('list_audio_sources')
-export const startLoopback = (
-  deviceId: string | null,
+export const armAudioSource = (source: import('./useAudioSource').AudioSource, recordName?: string | null) =>
+  invoke<void>('arm_audio_source', { source, recordName: recordName ?? null })
+export const disarmAudioSource = () => invoke<void>('disarm_audio_source')
+export const startExternalTranscription = (
   model: string,
   sourceLang: string,
   prompt: string,
   vadThreshold: number,
   vadMinSilenceMs: number,
-) =>
-  invoke<void>('start_loopback_transcription', { deviceId, model, sourceLang, prompt, vadThreshold, vadMinSilenceMs })
-export const stopLoopback = () => invoke<void>('stop_loopback_transcription')
+) => invoke<void>('start_external_transcription', { model, sourceLang, prompt, vadThreshold, vadMinSilenceMs })
+export const stopExternalTranscription = () => invoke<void>('stop_external_transcription')
+

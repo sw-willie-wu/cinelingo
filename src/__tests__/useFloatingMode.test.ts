@@ -6,8 +6,6 @@ const {
   settingsState,
   subsTracks,
   notify,
-  startLoopbackCapture,
-  stopLoopbackCapture,
   setVideoHidden,
 } = vi.hoisted(() => {
   const settingsState = { liveSubs: { enabled: true, sourceLang: 'ja', display: { lines: 3 } }, appearance: { primary: { fontSize: 28 } }, floating: { x: null, y: null, width: null } }
@@ -16,8 +14,6 @@ const {
     settingsState,
     subsTracks,
     notify: vi.fn(),
-    startLoopbackCapture: vi.fn().mockResolvedValue(undefined),
-    stopLoopbackCapture: vi.fn().mockResolvedValue(undefined),
     setVideoHidden: vi.fn().mockResolvedValue(undefined),
   }
 })
@@ -39,77 +35,53 @@ vi.mock('@tauri-apps/api/webviewWindow', () => ({
 }))
 vi.mock('../player/useSettings', () => ({ useSettings: () => ({ state: settingsState }) }))
 vi.mock('../player/usePlayer', () => ({ usePlayer: () => ({ notify }) }))
-vi.mock('../player/useSubtitles', () => ({ useSubtitles: () => ({ startLoopbackCapture, stopLoopbackCapture, tracks: subsTracks }) }))
+vi.mock('../player/useSubtitles', () => ({ useSubtitles: () => ({ tracks: subsTracks }) }))
 vi.mock('../mpv', () => ({ setVideoHidden }))
 
 import { useFloatingMode } from '../player/useFloatingMode'
 
 beforeEach(() => {
   vi.clearAllMocks()
-  settingsState.liveSubs.enabled = true
-  settingsState.liveSubs.sourceLang = 'ja'
-  subsTracks.primary.source = 'off'   // 預設無既有字幕 → 走 loopback
+  subsTracks.primary.source = 'off'
   const f = useFloatingMode(); if (f.active.value) f._forceReset()
 })
 
 describe('useFloatingMode guards', () => {
-  it('blocks enter when engine not enabled', async () => {
-    settingsState.liveSubs.enabled = false
-    const f = useFloatingMode(); await f.enter()
-    expect(f.active.value).toBe(false); expect(notify).toHaveBeenCalled(); expect(setVideoHidden).not.toHaveBeenCalled()
-  })
-  it('blocks enter when sourceLang is auto', async () => {
-    settingsState.liveSubs.sourceLang = 'auto'
-    const f = useFloatingMode(); await f.enter()
-    expect(f.active.value).toBe(false); expect(notify).toHaveBeenCalled(); expect(setVideoHidden).not.toHaveBeenCalled()
-  })
-  it('enters successfully: hides video (audio-only) + starts loopback', async () => {
+  it('enters successfully: hides video (audio-only)', async () => {
     const f = useFloatingMode(); await f.enter()
     expect(f.active.value).toBe(true)
-    expect(setVideoHidden).toHaveBeenCalledWith(true)   // mpv 只播音訊、放掉影像視窗（不 destroy）
-    expect(startLoopbackCapture).toHaveBeenCalledWith(null)
+    expect(setVideoHidden).toHaveBeenCalledWith(true)
   })
   it('re-entry guard: second enter while active is a no-op', async () => {
     const f = useFloatingMode(); await f.enter(); await f.enter()
     expect(setVideoHidden).toHaveBeenCalledTimes(1)
   })
-  it('rolls back (restores video) when loopback start fails', async () => {
-    startLoopbackCapture.mockRejectedValueOnce(new Error('boom'))
-    const f = useFloatingMode(); await f.enter()
-    expect(f.active.value).toBe(false)
-    expect(setVideoHidden).toHaveBeenCalledWith(false)   // rollback 還原影像
-    expect(notify).toHaveBeenCalled()
-  })
-  it('exit restores video + stops loopback', async () => {
+  it('exit restores video', async () => {
     const f = useFloatingMode(); await f.enter()
     setVideoHidden.mockClear()
     await f.exit()
     expect(f.active.value).toBe(false)
-    expect(stopLoopbackCapture).toHaveBeenCalled()
     expect(setVideoHidden).toHaveBeenCalledWith(false)
   })
   it('exit is idempotent when not active', async () => {
     const f = useFloatingMode(); await f.exit()
-    expect(stopLoopbackCapture).not.toHaveBeenCalled()
+    expect(setVideoHidden).not.toHaveBeenCalled()
   })
-
-  it('reuses existing clock subs: no loopback, no engine/lang guard', async () => {
-    subsTracks.primary.source = 'live'        // mode A 即時字幕（或字幕檔）已啟用
-    settingsState.liveSubs.enabled = false    // 引擎未啟用也不該擋（沿用不需引擎）
+  it('enters regardless of engine/lang settings (no guards)', async () => {
+    settingsState.liveSubs.enabled = false    // 引擎未啟用不擋
     settingsState.liveSubs.sourceLang = 'auto'
     const f = useFloatingMode(); await f.enter()
     expect(f.active.value).toBe(true)
     expect(setVideoHidden).toHaveBeenCalledWith(true)
-    expect(startLoopbackCapture).not.toHaveBeenCalled()   // 沿用既有字幕 → 不開 loopback
-    expect(notify).not.toHaveBeenCalled()                 // 守衛被跳過
+    expect(notify).not.toHaveBeenCalled()
   })
-
-  it('reuse mode exit does not stop the existing subs (no loopback to stop)', async () => {
+  it('enters with existing subs (source=live): no guards, hides video', async () => {
     subsTracks.primary.source = 'live'
+    settingsState.liveSubs.enabled = false    // 引擎未啟用也不擋（沿用不需引擎）
+    settingsState.liveSubs.sourceLang = 'auto'
     const f = useFloatingMode(); await f.enter()
-    await f.exit()
-    expect(f.active.value).toBe(false)
-    expect(stopLoopbackCapture).not.toHaveBeenCalled()    // 沒開 loopback → 退出不停既有字幕
-    expect(setVideoHidden).toHaveBeenCalledWith(false)    // 影像還是回來
+    expect(f.active.value).toBe(true)
+    expect(setVideoHidden).toHaveBeenCalledWith(true)
+    expect(notify).not.toHaveBeenCalled()
   })
 })
