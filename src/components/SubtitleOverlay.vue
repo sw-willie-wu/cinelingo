@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, onMounted, onBeforeUnmount } from 'vue'
+import { computed, ref, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useSubtitles, type TrackName } from '../player/useSubtitles'
 import { usePlayer } from '../player/usePlayer'
 import { useSettings } from '../player/useSettings'
@@ -45,12 +45,22 @@ const live = computed((): { lines: string[]; interimLines: string[] } =>
     ? liveLines(subs.liveCues.value, subs.liveInterim.value, settings.state.liveSubs.display.lines, liveCap.value)
     : { lines: [] as string[], interimLines: [] as string[] }
 )
+
+// 閒置偵測（僅 loopback）：超過 IDLE_MS 沒新字幕 → 清掉最後字幕（與浮動字幕一致；句間空檔不殘留）。
+const IDLE_MS = 4000
+const now = ref(Date.now())
+let lastActivity = Date.now()
+let idleTimer: ReturnType<typeof setInterval> | undefined
+onMounted(() => { idleTimer = setInterval(() => { now.value = Date.now() }, 1000) })
+onBeforeUnmount(() => { if (idleTimer) clearInterval(idleTimer) })
+watch(live, () => { lastActivity = Date.now() })   // loopback 內容變動＝活動
+const idle = computed(() => now.value - lastActivity > IDLE_MS)
 </script>
 
 <template>
   <!-- no-clock (loopback)：多行 last-N final + interim（較淡） -->
   <div
-    v-if="subs.noClock.value && (live.lines.length || live.interimLines.length)"
+    v-if="subs.noClock.value && (live.lines.length || live.interimLines.length) && !idle"
     class="sub-overlay"
     :style="p.overlayStyle.value"
   >
