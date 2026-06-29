@@ -105,6 +105,6 @@ function onPointerLeave() { hoverFraction.value = null }
 .hover-tip {
   position: absolute; bottom: 18px; transform: translateX(-50%);
   background: rgba(0, 0, 0, 0.85); color: #fff; padding: 2px 6px; border-radius: 3px;
-  font: 11px/1 sans-serif; white-space: nowrap; pointer-events: none;
+  font: 11px/1 var(--font); white-space: nowrap; pointer-events: none;
 }
 </style>

@@ -16,6 +16,7 @@ import NormalizeScreen from './adjust/NormalizeScreen.vue'
 import AudioDelayScreen from './adjust/AudioDelayScreen.vue'
 import SubtitleTrackScreen from './adjust/SubtitleTrackScreen.vue'
 import AudioSourceScreen from './adjust/AudioSourceScreen.vue'
+import PlayerIcon from './PlayerIcon.vue'
 
 defineProps<{ open: boolean }>()
 const emit = defineEmits<{ close: [] }>()
@@ -63,19 +64,19 @@ function close() { screen.value = 'root'; emit('close') }
     <div class="sm-menu" @click.stop>
       <template v-if="screen === 'root'">
         <div class="sec">播放</div>
-        <div class="item" @click="go('speed')"><span class="ic">⏩</span><span class="nm">播放速度</span><span class="cur">{{ speed }}×</span><span class="gt">›</span></div>
-        <div class="item" :class="{ disabled: !isRemote }" @click="isRemote && go('quality')"><span class="ic">▢</span><span class="nm">畫質</span><span class="cur">{{ isRemote ? qualityLabel : '僅串流影片' }}</span><span class="gt">›</span></div>
+        <div class="item" @click="go('speed')"><span class="ic"><PlayerIcon name="speed" :size="18" /></span><span class="nm">播放速度</span><span class="cur">{{ speed }}×</span><span class="gt">›</span></div>
+        <div class="item" :class="{ disabled: !isRemote }" @click="isRemote && go('quality')"><span class="ic"><PlayerIcon name="quality" :size="18" /></span><span class="nm">畫質</span><span class="cur">{{ isRemote ? qualityLabel : '僅串流影片' }}</span><span class="gt">›</span></div>
         <div class="sec">影像</div>
-        <div class="item" @click="go('image')"><span class="ic">◐</span><span class="nm">影像調整</span><span class="cur">{{ imageLabel }}</span><span class="gt">›</span></div>
+        <div class="item" @click="go('image')"><span class="ic"><PlayerIcon name="image" :size="18" /></span><span class="nm">影像調整</span><span class="cur">{{ imageLabel }}</span><span class="gt">›</span></div>
         <div class="sec">音訊</div>
-        <div class="item" @click="go('eq')"><span class="ic">🎚</span><span class="nm">等化器 EQ</span><span class="cur">{{ audio.eq.enabled ? audio.eq.preset : '關' }}</span><span class="gt">›</span></div>
-        <div class="item" @click="go('normalize')"><span class="ic">◎</span><span class="nm">音量正規化</span><span class="cur">{{ audio.normalize() ? '開' : '關' }}</span><span class="gt">›</span></div>
-        <div class="item" @click="go('audiodelay')"><span class="ic">⇄</span><span class="nm">音訊延遲</span><span class="cur">{{ audio.audioDelayMs.value }}ms</span><span class="gt">›</span></div>
-        <div class="item" @click="go('audiosource')"><span class="ic">🎙</span><span class="nm">外部音源</span><span class="cur" :class="{ active: audioSrc.armed.value }">{{ audioSourceLabel() }}</span><span class="gt">›</span></div>
+        <div class="item" @click="go('eq')"><span class="ic"><PlayerIcon name="adjust" :size="18" /></span><span class="nm">等化器 EQ</span><span class="cur">{{ audio.eq.enabled ? audio.eq.preset : '關' }}</span><span class="gt">›</span></div>
+        <div class="item" @click="go('normalize')"><span class="ic"><PlayerIcon name="normalize" :size="18" /></span><span class="nm">音量正規化</span><span class="cur">{{ audio.normalize() ? '開' : '關' }}</span><span class="gt">›</span></div>
+        <div class="item" @click="go('audiodelay')"><span class="ic"><PlayerIcon name="audiodelay" :size="18" /></span><span class="nm">音訊延遲</span><span class="cur">{{ audio.audioDelayMs.value }}ms</span><span class="gt">›</span></div>
+        <div class="item" @click="go('audiosource')"><span class="ic"><PlayerIcon name="mic" :size="18" /></span><span class="nm">外部音源</span><span class="cur" :class="{ active: audioSrc.armed.value }">{{ audioSourceLabel() }}</span><span class="gt">›</span></div>
         <div class="sec">字幕</div>
-        <div class="item" @click="go('primary')"><span class="ic">字</span><span class="nm">主字幕</span><span class="cur">{{ trackLabel('primary') }}</span><span class="gt">›</span></div>
+        <div class="item" @click="go('primary')"><span class="ic"><PlayerIcon name="captions-live" :size="18" /></span><span class="nm">主字幕</span><span class="cur">{{ trackLabel('primary') }}</span><span class="gt">›</span></div>
         <div class="item" :class="{ disabled: secondaryDisabled }" @click="!secondaryDisabled && go('secondary')">
-          <span class="ic">字</span><span class="nm">第二字幕</span><span class="cur">{{ secondaryDisabled ? '需先開主字幕' : trackLabel('secondary') }}</span><span class="gt">›</span>
+          <span class="ic"><PlayerIcon name="tracks" :size="18" /></span><span class="nm">第二字幕</span><span class="cur">{{ secondaryDisabled ? '需先開主字幕' : trackLabel('secondary') }}</span><span class="gt">›</span>
         </div>
       </template>
       <SpeedScreen v-else-if="screen === 'speed'" @back="go('root')" />
@@ -100,6 +101,6 @@ function close() { screen.value = 'root'; emit('close') }
 .item { display: flex; align-items: center; gap: 12px; padding: 11px 15px; cursor: pointer; }
 .item:hover { background: rgba(255,255,255,0.04); }
 .item.disabled { opacity: .4; cursor: not-allowed; }
-.item .ic { font-size: 15px; width: 20px; text-align: center; color: #cfd2db; }
+.item .ic { display: inline-flex; align-items: center; justify-content: center; width: 20px; color: #cfd2db; }
 .item .nm { flex: 1; white-space: nowrap; } .item .cur { color: #8a8d99; font-size: 12px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .item .cur.active { color: var(--accent); } .item .gt { color: #6b6e7a; margin-left: 4px; }
 </style>

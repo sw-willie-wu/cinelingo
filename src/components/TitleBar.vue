@@ -48,7 +48,7 @@ const maxName = computed(() => maxIconKind(isMaximized.value))   // 'maximize' |
 .title {
   position: absolute; left: 50%; transform: translateX(-50%);
   max-width: 55%; text-align: center;
-  font: 13px sans-serif; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  font: 13px var(--font); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .win-controls { display: flex; height: 100%; margin-left: auto; }
 .wc {
