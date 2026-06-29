@@ -3,6 +3,7 @@
 use super::cue::{derive_cue_id, Cue};
 use super::{hallucination, session, whisper, ProgressEvent, SessionResetEvent};
 use crate::capture::loopback;
+use crate::subs::translate::Translator;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
@@ -139,6 +140,7 @@ fn commit_seg(seg: &StreamSeg, base_offset: f64, session_id: &str, lang: &str,
             session_id: session_id.to_string(),
             start_sec: abs_start, end_sec: abs_end,
             source_text: t, lang: Some(lang.to_string()), status: "final".into(),
+            ..Default::default()
         });
     }
     if abs_end > *new_offset { *new_offset = abs_end; }
@@ -146,7 +148,8 @@ fn commit_seg(seg: &StreamSeg, base_offset: f64, session_id: &str, lang: &str,
 
 fn empty_interim(session_id: &str) -> Cue {
     Cue { id: format!("{session_id}:interim"), session_id: session_id.to_string(),
-          start_sec: 0.0, end_sec: 0.0, source_text: String::new(), lang: None, status: "interim".into() }
+          start_sec: 0.0, end_sec: 0.0, source_text: String::new(), lang: None, status: "interim".into(),
+          ..Default::default() }
 }
 
 /// 串流定稿決策（四觸發；純函式）。spec §2.3。
@@ -200,6 +203,7 @@ pub fn step(inp: StepInput) -> StepOutcome {
                     start_sec: abs_start, end_sec: abs_end,
                     source_text: last_collapsed.clone(),
                     lang: Some(inp.lang.to_string()), status: "interim".into(),
+                    ..Default::default()
                 });
                 new_held = Some(HeldInterim { text: last_collapsed, start_sec: abs_start, end_sec: abs_end });
             }
@@ -315,6 +319,9 @@ async fn run_loop(
     let mut held: Option<HeldInterim> = None;
     let mut recent_text = String::new(); // 滾動近期已定稿文字（prompt 上下文，per-session 起空）
     let mut server_ready = false;
+    const MAX_INFLIGHT_TRANSLATIONS: usize = 3;
+    let xlate_sem = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_INFLIGHT_TRANSLATIONS));
+    let mut translator_warming = false;
     let mut port = 0u16;
     let mut active: Option<(String /*lang*/, String /*prompt*/, String /*model*/)> = None;
     let mut last_level = std::time::Instant::now();
@@ -360,6 +367,17 @@ async fn run_loop(
             port = session::ensure_server(&app, &mgr, &data, &cancel, &p.model, &vad, &downloading).await?;
             active = Some((p.source_lang.clone(), p.prompt.clone(), p.model.clone()));
             server_ready = true;
+            // 背景暖機 translator（CC 開且有目標語、只 spawn 一次；不阻字幕）
+            let want_xlate = { params_h.lock().unwrap().as_ref().and_then(|p| p.target_lang.clone()) };
+            if want_xlate.is_some() && !translator_warming {
+                translator_warming = true;
+                let (a2, m2, d2, dl2) = (app.clone(), mgr.clone(), data.clone(), downloading.clone());
+                tokio::spawn(async move {
+                    if let Err(e) = session::ensure_translator(&a2, &m2, &d2, &dl2).await {
+                        eprintln!("[stream] translator 暖機失敗（字幕仍走、暫不翻）：{e}");
+                    }
+                });
+            }
             // reset offset/buffer 邊界，避免把 drain-only 期間的舊音當待轉
             offset_sec = captured_sec;
             frames.clear();
@@ -405,9 +423,30 @@ async fn run_loop(
                 last_interim_text: &last_interim_text, agreement_count,
                 held_interim: held.clone(), session_id: &session_id, lang: &lang,
             });
+            let target_lang: Option<String> = { params_h.lock().unwrap().as_ref().and_then(|p| p.target_lang.clone()) };
+            let translator = if target_lang.is_some() { mgr.lock().await.translator_clone() } else { None };
             for f in &o.finals {
                 app.emit("sub-cue", f).ok();
                 recent_text.push_str(&f.source_text); // 累積已定稿（已過 collapse，不會灌重複牆）
+                if let (Some(tr), Some(tgt)) = (translator.clone(), target_lang.clone()) {
+                    if let Ok(permit) = xlate_sem.clone().try_acquire_owned() {  // 滿了就跳過（只留原文）
+                        let app2 = app.clone();
+                        let mut cue = f.clone();
+                        let src_lang = f.lang.clone();
+                        tokio::spawn(async move {
+                            let _permit = permit; // 持有到翻譯結束
+                            match tr.translate(&cue.source_text, src_lang.as_deref(), &tgt).await {
+                                Ok(t) if !t.is_empty() => {
+                                    cue.target_text = Some(t);
+                                    cue.target_lang = Some(tgt);
+                                    app2.emit("sub-cue", &cue).ok(); // 同 id → 前端 upsertCue 就地覆蓋
+                                }
+                                Ok(_) => {}
+                                Err(e) => eprintln!("[stream] translate 失敗（保留原文）：{e}"),
+                            }
+                        });
+                    }
+                }
             }
             if let Some(cues) = &record_cues {           // 錄製：定稿 cue 收進 SRT buffer（停止時寫檔）
                 cues.lock().unwrap_or_else(|e| e.into_inner()).extend(o.finals.iter().cloned());

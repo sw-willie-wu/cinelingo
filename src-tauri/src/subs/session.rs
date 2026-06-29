@@ -14,6 +14,8 @@ pub struct TranscribeParams {
     pub prompt: String,
     pub vad_threshold: f64,
     pub vad_min_silence_ms: i64,
+    #[allow(dead_code)] // Task 7 will read this to drive translation
+    pub target_lang: Option<String>,
 }
 
 /// VAD 啟動參數（whisper-server 啟動旗標；改值需重啟 server）。
@@ -80,6 +82,8 @@ pub struct Manager {
     transcribe_params: Arc<std::sync::Mutex<Option<TranscribeParams>>>,
     // 錄製擷取：run_loop 串流寫 WAV + 累積定稿 cue；停止路徑（disarm/重 arm/shutdown）finalize。
     record: Option<RecordState>,
+    // 翻譯 sidecar（lazy；ensure_translator 首次需要時起動）。
+    translator: Option<Arc<crate::subs::translate::local::LocalLlmTranslator>>,
 }
 
 /// 錄製狀態：WAV 由 capture 執行緒串流寫（源取樣率，停止時自行 finalize）；此處只持
@@ -108,6 +112,7 @@ impl Default for Manager {
             transcribe_enabled: Arc::new(AtomicBool::new(false)),
             transcribe_params: Arc::new(std::sync::Mutex::new(None)),
             record: None,
+            translator: None,
         }
     }
 }
@@ -151,6 +156,10 @@ impl Manager {
         if let Some(s) = self.server.take() {
             s.kill().await;
         }
+        // app 關閉：明確殺 translator sidecar（kill_on_drop 在 ExitRequested 不可靠）。
+        if let Some(tr) = self.translator.take() {
+            tr.shutdown().await;
+        }
         if let Some(d) = &self.data_dir {
             sweep_temp(d);
         }
@@ -190,6 +199,12 @@ impl Manager {
     pub fn params_handle(&self) -> Arc<std::sync::Mutex<Option<TranscribeParams>>> { self.transcribe_params.clone() }
     pub fn set_transcribe(&self, on: bool) { self.transcribe_enabled.store(on, Ordering::SeqCst); }
     pub fn set_transcribe_params(&self, p: TranscribeParams) { *self.transcribe_params.lock().unwrap() = Some(p); }
+
+    /// 翻譯器 getter（Task 7 run_loop 用）。
+    #[allow(dead_code)] // Task 7 calls this from run_loop
+    pub fn translator_clone(&self) -> Option<Arc<crate::subs::translate::local::LocalLlmTranslator>> {
+        self.translator.clone()
+    }
 
     // 錄製 accessors（stream::start 設定、run_loop 寫入、停止路徑 finalize）
     pub(crate) fn set_record(&mut self, state: RecordState) {
@@ -304,6 +319,30 @@ pub(crate) async fn ensure_server(
         old.kill().await; // 殺舊（鎖外）
     }
     Ok(port)
+}
+
+/// 確保翻譯 sidecar 就緒（lazy：已有則直接回；否則下載+起動）。鏡像 ensure_server。
+/// data = <root>/subs；llm 目錄從 data.parent()（root）下的 llm/（對齊 provision 下載位置）。
+#[allow(dead_code)] // Task 7 calls this to warm up the translator before run_loop
+pub async fn ensure_translator(
+    app: &AppHandle,
+    mgr: &Arc<tokio::sync::Mutex<Manager>>,
+    data: &std::path::Path,
+    downloading: &Arc<std::sync::Mutex<HashSet<String>>>,
+) -> Result<Arc<crate::subs::translate::local::LocalLlmTranslator>, String> {
+    // fast path：已有直接回
+    if let Some(t) = { mgr.lock().await.translator.clone() } {
+        return Ok(t);
+    }
+    // data = <root>/subs；llm 目錄須在 root 下（對齊 provision 的 download::llm_dir(root)）
+    let root = data.parent().unwrap_or(data);
+    let llm = download::llm_dir(root);
+    let hw = hwdetect::detect_hardware_blocking();
+    let backend = if hw.backend == "cuda" { hwdetect::Backend::Cuda } else { hwdetect::Backend::Cpu };
+    let (exe, gguf) = download::ensure_llm_assets(app, &llm, downloading, backend, prog_emit(app.clone(), "llm")).await?;
+    let tr = Arc::new(crate::subs::translate::local::LocalLlmTranslator::new(&exe, &gguf).await?);
+    mgr.lock().await.translator = Some(tr.clone());
+    Ok(tr)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -596,6 +635,19 @@ async fn ensure_assets(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transcribe_params_default_target_lang_none() {
+        let p = TranscribeParams {
+            model: "m".into(),
+            source_lang: "en".into(),
+            prompt: String::new(),
+            vad_threshold: 0.5,
+            vad_min_silence_ms: 100,
+            target_lang: None,
+        };
+        assert!(p.target_lang.is_none());
+    }
 
     #[test]
     fn vad_eq_equal_and_within_tolerance() {
