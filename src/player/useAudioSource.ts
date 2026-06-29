@@ -11,6 +11,14 @@ export function normalizeLevel(rms: number): number {
   return Math.max(0, Math.min(1, rms * LEVEL_GAIN))
 }
 
+// 錄音檔名（時間戳，本地時間）；未開啟錄製 → null（後端不錄）。
+function recordingName(): string | null {
+  if (!useSettings().state.capture.recordAudio) return null
+  const d = new Date()
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `capture-${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}.wav`
+}
+
 // Sent to backend — matches Rust AudioSource enum serde
 export type AudioSource =
   | { kind: 'system' }
@@ -69,7 +77,7 @@ async function arm(sel: PanelSelection): Promise<void> {
     source = { kind: 'system' }
   }
 
-  await armAudioSource(source)
+  await armAudioSource(source, recordingName())
 
   // Persist: for process keep name, drop pid
   let persisted: PersistedSource

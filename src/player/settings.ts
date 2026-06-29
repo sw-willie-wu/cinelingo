@@ -21,7 +21,7 @@ export interface Settings {
   hardware: { accelEnabled: boolean | null }
   appearance: { maxWidthPct: number; primary: SubStyle; secondary: SubStyle }
   ui: { language: string }
-  capture: { enabled: boolean }
+  capture: { enabled: boolean; recordAudio: boolean }
   youtube: { quality: 'auto' | number }
   playback: { videoOutput: VideoOutput }
   floating: { x: number | null; y: number | null; width: number | null }
@@ -48,7 +48,7 @@ export function defaultSettings(): Settings {
       secondary: { fontSize: 18, bottomPct: 18, color: '#ffe14d', outline: 'thin', background: 'translucent' },
     },
     ui: { language: 'zh-TW' },
-    capture: { enabled: false },
+    capture: { enabled: false, recordAudio: false },
     youtube: { quality: 'auto' },
     playback: { videoOutput: 'gpu' },
     floating: { x: null, y: null, width: null },
@@ -129,7 +129,7 @@ export function mergeSettings(raw: unknown): Settings {
       secondary: mergeStyle(ap.secondary, d.appearance.secondary),
     },
     ui: { language: str(ui.language, d.ui.language) },
-    capture: { enabled: bool(cap.enabled, d.capture.enabled) },
+    capture: { enabled: bool(cap.enabled, d.capture.enabled), recordAudio: bool(cap.recordAudio, d.capture.recordAudio) },
     youtube: { quality: pick(yt.quality, YT_QUALITIES, d.youtube.quality) },
     playback: { videoOutput: pick(obj(o.playback).videoOutput, VIDEO_OUTPUTS, d.playback.videoOutput) },
     floating: (() => {

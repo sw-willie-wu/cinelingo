@@ -1,7 +1,9 @@
 <script setup lang="ts">
-import { onMounted, onBeforeUnmount, watch, computed } from 'vue'
+import { onMounted, onBeforeUnmount, watch, computed, ref } from 'vue'
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
 import { invoke } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
+import { revealItemInDir } from '@tauri-apps/plugin-opener'
 import { usePlayer } from './player/usePlayer'
 import { useKeyboard } from './player/useKeyboard'
 import { useAutoHide } from './player/useAutoHide'
@@ -67,6 +69,12 @@ const dlText = computed(() => {
 
 let unlistenDrop: (() => void) | null = null
 let unlistenClose: (() => void) | null = null
+let unlistenRec: (() => void) | null = null
+
+// 錄音存檔提示（點擊開啟資料夾）；後端 disarm/重 arm 時 emit recording-saved。
+const recordingSaved = ref<string | null>(null)
+let recTimer: ReturnType<typeof setTimeout> | undefined
+function openRecordingFolder() { if (recordingSaved.value) void revealItemInDir(recordingSaved.value) }
 
 onMounted(async () => {
   await player.start()
@@ -85,6 +93,12 @@ onMounted(async () => {
     }
   })
 
+  unlistenRec = await listen<string>('recording-saved', (e) => {
+    recordingSaved.value = e.payload
+    clearTimeout(recTimer)
+    recTimer = setTimeout(() => { recordingSaved.value = null }, 6000)
+  })
+
   unlistenClose = await win.onCloseRequested(async (event) => {
     event.preventDefault()
     try {
@@ -97,7 +111,7 @@ onMounted(async () => {
   })
 })
 
-onBeforeUnmount(() => { unlistenDrop?.(); unlistenClose?.() })
+onBeforeUnmount(() => { unlistenDrop?.(); unlistenClose?.(); unlistenRec?.() })
 
 // 左鍵按住拖曳超過 4px → 移動視窗(整個 overlay,不限 titlebar)。
 // 排除按鈕 / 進度條 / 音量條 / 縮放把手;單擊雙擊不誤觸(雙擊影片仍進全螢幕)。
@@ -146,6 +160,11 @@ function onOverlayPointerUp() { dragOrigin = null }
         <div v-else-if="player.source.loadError" class="url-toast err">{{ player.source.loadError }}</div>
       </Transition>
       <LoadingOverlay v-if="player.state.pausedForCache" :percent="player.state.cacheBufferingState ?? 0" />
+      <Transition name="rectoast">
+        <button v-if="recordingSaved" class="rec-toast" @click="openRecordingFolder">
+          🎙 已儲存錄音 · 點擊開啟資料夾
+        </button>
+      </Transition>
       <div class="scrim scrim-top" :class="{ hidden: !visible || settings.modal.open }"></div>
       <div class="scrim scrim-bottom" :class="{ hidden: !visible || settings.modal.open }"></div>
       <div
@@ -194,6 +213,16 @@ function onOverlayPointerUp() { dragOrigin = null }
   background: rgba(20,20,24,0.85); color: #e8e8ea; padding: 10px 18px; border-radius: 10px;
   font-size: 13px; pointer-events: none; backdrop-filter: blur(8px); }
 .url-toast.err { color: #ff9a9a; }
+.rec-toast {
+  position: absolute; top: 48px; right: 14px; z-index: 9;
+  background: rgba(20,20,24,0.9); color: #e8e8ea; padding: 9px 16px; border-radius: 10px;
+  font: 13px var(--font); border: 1px solid rgba(255,255,255,0.14); cursor: pointer;
+  backdrop-filter: blur(8px); white-space: nowrap; box-shadow: 0 8px 24px rgba(0,0,0,.4);
+}
+.rec-toast:hover { background: rgba(36,36,42,0.95); color: #fff; }
+/* 右上彈出：由右滑入 + 淡入 */
+.rectoast-enter-active, .rectoast-leave-active { transition: opacity .25s ease, transform .25s cubic-bezier(.4,0,.2,1); }
+.rectoast-enter-from, .rectoast-leave-to { opacity: 0; transform: translateX(16px); }
 .toast-enter-active, .toast-leave-active { transition: opacity 0.4s ease; }
 .toast-enter-from, .toast-leave-to { opacity: 0; }
 .dl-banner {

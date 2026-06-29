@@ -79,10 +79,11 @@ describe('settings defaults + merge', () => {
       .toEqual({ threshold: 0.5, minSilenceMs: 100 })
   })
   it('capture defaults + merge', () => {
-    expect(defaultSettings().capture).toEqual({ enabled: false })
-    expect(mergeSettings({}).capture).toEqual({ enabled: false })
+    expect(defaultSettings().capture).toEqual({ enabled: false, recordAudio: false })
+    expect(mergeSettings({}).capture).toEqual({ enabled: false, recordAudio: false })
     expect(mergeSettings({ capture: { enabled: true } }).capture.enabled).toBe(true)
     expect(mergeSettings({ capture: { enabled: 'x' } } as any).capture.enabled).toBe(false)
+    expect(mergeSettings({ capture: { recordAudio: true } } as any).capture.recordAudio).toBe(true)
   })
   it('maxWidthPct: default 80, lives on appearance', () => {
     expect(defaultSettings().appearance.maxWidthPct).toBe(80)

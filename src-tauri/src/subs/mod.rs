@@ -16,6 +16,7 @@ pub mod stream;
 use serde::Serialize;
 use std::collections::HashSet;
 use std::sync::Arc;
+use tauri::Emitter;
 use tokio::sync::Mutex;
 
 #[derive(Default)]
@@ -194,18 +195,28 @@ pub async fn arm_audio_source(
     app: tauri::AppHandle,
     state: tauri::State<'_, SubsState>,
     source: crate::capture::source::AudioSource,
+    record_name: Option<String>,   // Some → 錄製整段擷取音訊到 recordings/<name>
 ) -> Result<(), String> {
     let mgr = state.inner.clone();
     let downloading = state.downloading.clone();
     { let m = mgr.lock().await; m.set_transcribe(false); } // 確保 run_loop 以 drain-only 模式啟動
-    stream::start(app, mgr, source, downloading).await
+    stream::start(app, mgr, source, downloading, record_name).await
 }
 
 #[tauri::command]
-pub async fn disarm_audio_source(state: tauri::State<'_, SubsState>) -> Result<(), String> {
-    let mut m = state.inner.lock().await;
-    m.set_transcribe(false);
-    m.stop_task_pub(); // abort run_loop + 停 capture thread
+pub async fn disarm_audio_source(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, SubsState>,
+) -> Result<(), String> {
+    let saved = {
+        let mut m = state.inner.lock().await;
+        m.set_transcribe(false);
+        m.stop_task_pub();        // abort run_loop + 停 capture thread（先停才無並發 append）
+        m.finalize_record()       // 收尾錄音（若有）→ 寫 WAV
+    };
+    if let Some(p) = saved {
+        app.emit("recording-saved", p.to_string_lossy().to_string()).ok();
+    }
     Ok(())
 }
 

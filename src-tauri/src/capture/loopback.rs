@@ -6,6 +6,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
+use std::path::Path;
 
 use crate::capture::source::AudioSource;
 
@@ -66,6 +67,67 @@ pub fn tail_has_speech(frames: &[f32], tail_sec: f64, thresh: f32) -> bool {
     rms(&frames[frames.len() - n..]) >= thresh
 }
 
+/// 串流寫 16-bit PCM WAV（任意 rate/channels）：開檔寫 placeholder header → 每 chunk append →
+/// 停止時 finalize 補回 RIFF/data 大小。給長時間擷取（會議數小時）邊錄邊寫、不吃 RAM。
+/// 錄製走「源取樣率、未經 resample」的乾淨音訊（resample 是 per-packet 無狀態，會有邊界 click）。
+pub struct WavRecorder {
+    file: std::fs::File,
+    rate: u32,
+    channels: u16,
+    pub samples: u32, // 已寫入的取樣值數（frames×channels）；data_len = samples×2
+}
+
+fn write_wav_header(f: &mut std::fs::File, rate: u32, channels: u16, data_len: u32) -> std::io::Result<()> {
+    use std::io::Write;
+    let block_align = channels * 2; // 16-bit
+    let byte_rate = rate * block_align as u32;
+    f.write_all(b"RIFF")?;
+    f.write_all(&(36 + data_len).to_le_bytes())?;
+    f.write_all(b"WAVE")?;
+    f.write_all(b"fmt ")?;
+    f.write_all(&16u32.to_le_bytes())?;        // fmt chunk size（PCM）
+    f.write_all(&1u16.to_le_bytes())?;         // audio format = PCM
+    f.write_all(&channels.to_le_bytes())?;     // channels
+    f.write_all(&rate.to_le_bytes())?;         // sample rate
+    f.write_all(&byte_rate.to_le_bytes())?;    // byte rate
+    f.write_all(&block_align.to_le_bytes())?;  // block align
+    f.write_all(&16u16.to_le_bytes())?;        // bits per sample
+    f.write_all(b"data")?;
+    f.write_all(&data_len.to_le_bytes())?;
+    Ok(())
+}
+
+impl WavRecorder {
+    pub fn create(path: &Path, rate: u32, channels: u16) -> std::io::Result<Self> {
+        let mut file = std::fs::File::create(path)?;
+        write_wav_header(&mut file, rate, channels, 0)?; // placeholder；finalize 時補正確大小
+        Ok(Self { file, rate, channels, samples: 0 })
+    }
+
+    pub fn write_chunk(&mut self, chunk: &[f32]) -> std::io::Result<()> {
+        use std::io::Write;
+        let mut buf = Vec::with_capacity(chunk.len() * 2);
+        for &s in chunk {
+            buf.extend_from_slice(&((s.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes());
+        }
+        self.file.write_all(&buf)?;
+        self.samples = self.samples.saturating_add(chunk.len() as u32);
+        Ok(())
+    }
+
+    /// 補回 header 的 RIFF/data 大小並 flush（停止路徑呼叫）。
+    pub fn finalize(&mut self) -> std::io::Result<()> {
+        use std::io::{Seek, SeekFrom, Write};
+        let _ = (self.rate, self.channels); // header 已寫入，這裡只補大小
+        let data_len = self.samples.saturating_mul(2);
+        self.file.seek(SeekFrom::Start(4))?;
+        self.file.write_all(&(36 + data_len).to_le_bytes())?;
+        self.file.seek(SeekFrom::Start(40))?;
+        self.file.write_all(&data_len.to_le_bytes())?;
+        self.file.flush()
+    }
+}
+
 // ─────────────────────────── Task 8: 裝置列舉 ───────────────────────────
 
 #[derive(Clone, Serialize)]
@@ -116,12 +178,12 @@ type CaptureSession = (Arc<AtomicBool>, std::thread::JoinHandle<()>, Receiver<Ve
 
 /// 啟動音源擷取執行緒。
 /// 回 (stop_flag, JoinHandle, Receiver<16k mono f32 chunks>)。
-pub fn start_capture(source: AudioSource) -> Result<CaptureSession, String> {
+pub fn start_capture(source: AudioSource, record: Option<std::path::PathBuf>) -> Result<CaptureSession, String> {
     let (tx, rx): (Sender<Vec<f32>>, Receiver<Vec<f32>>) = channel();
     let stop = Arc::new(AtomicBool::new(false));
     let stop2 = stop.clone();
     let handle = std::thread::spawn(move || {
-        if let Err(e) = capture_loop(source, tx, &stop2) {
+        if let Err(e) = capture_loop(source, tx, &stop2, record) {
             eprintln!("[loopback] capture loop ended: {e}");
         }
     });
@@ -215,6 +277,7 @@ fn capture_loop(
     source: AudioSource,
     tx: Sender<Vec<f32>>,
     stop: &AtomicBool,
+    record: Option<std::path::PathBuf>,
 ) -> Result<(), String> {
     // COM (MTA)：此執行緒專用，與 Manager / tokio 完全隔離。
     let _ = wasapi::initialize_mta();
@@ -228,6 +291,13 @@ fn capture_loop(
     let h_event = audio_client.set_get_eventhandle().map_err(|e| e.to_string())?;
     let capture_client = audio_client.get_audiocaptureclient().map_err(|e| e.to_string())?;
     audio_client.start_stream().map_err(|e| e.to_string())?;
+
+    // 錄音：源取樣率 mono、未經 resample（resample 的 per-packet 邊界 click 會讓錄音破音/斷續）。
+    // 在此執行緒寫檔；本執行緒收 stop 旗標後正常退出（非 abort）→ 迴圈後可可靠 finalize。
+    let mut recorder = record.as_ref().and_then(|p| match WavRecorder::create(p, src_rate, 1) {
+        Ok(r) => Some(r),
+        Err(e) => { eprintln!("[loopback] 建立錄音 WAV 失敗：{e}"); None }
+    });
 
     // 5. 主迴圈：有上限 event 等待 + 每圈重查 stop（整合契約：≤~200ms 內必退）。
     let mut deque: VecDeque<u8> = VecDeque::new();
@@ -257,6 +327,9 @@ fn capture_loop(
             continue;
         }
         let mono = downmix(&interleaved, channels);
+        if let Some(r) = &mut recorder {        // 錄製：寫源取樣率 mono（resample 前的乾淨音訊）
+            let _ = r.write_chunk(&mono);
+        }
         let resampled = resample_to_16k(&mono, src_rate);
         // 非空才送；send 失敗＝consumer 已 drop Receiver → 立即退出（不阻塞、不碰 Manager）。
         if !resampled.is_empty() && tx.send(resampled).is_err() {
@@ -266,6 +339,15 @@ fn capture_loop(
 
     // 6. 收尾。
     let _ = audio_client.stop_stream();
+    // finalize 錄音：補 header 大小；完全沒錄到（0 samples）→ 刪空檔。
+    if let Some(mut r) = recorder {
+        let empty = r.samples == 0;
+        let _ = r.finalize();
+        if empty {
+            drop(r);
+            if let Some(p) = &record { let _ = std::fs::remove_file(p); }
+        }
+    }
     Ok(())
 }
 

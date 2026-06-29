@@ -53,7 +53,8 @@ export interface ProcessSource { pid: number; name: string }
 export interface InputDevice { id: string; name: string; isDefault: boolean }
 export interface AudioSources { processes: ProcessSource[]; inputDevices: InputDevice[] }
 export const listAudioSources = () => invoke<AudioSources>('list_audio_sources')
-export const armAudioSource = (source: import('./useAudioSource').AudioSource) => invoke<void>('arm_audio_source', { source })
+export const armAudioSource = (source: import('./useAudioSource').AudioSource, recordName?: string | null) =>
+  invoke<void>('arm_audio_source', { source, recordName: recordName ?? null })
 export const disarmAudioSource = () => invoke<void>('disarm_audio_source')
 export const startExternalTranscription = (
   model: string,

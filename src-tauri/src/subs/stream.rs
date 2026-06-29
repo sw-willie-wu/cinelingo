@@ -236,29 +236,50 @@ pub async fn start(
     mgr: Arc<tokio::sync::Mutex<session::Manager>>,
     source: crate::capture::source::AudioSource,
     downloading: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    record_name: Option<String>,
 ) -> Result<(), String> {
-    let data = crate::data_dir(&app)?.join("subs");
-    let (stop, thread, rx) = loopback::start_capture(source)?;
+    let dd = crate::data_dir(&app)?;
+    let data = dd.join("subs");
+    // 錄製：算輸出路徑 + cue 累積（WAV 由 capture 執行緒在源取樣率寫，見 loopback；
+    // recordings/<safe-name>.wav，sanitize 去路徑分隔避免逃逸）。建目錄。
+    let rec = record_name.map(|n| {
+        let wav_path = dd.join("recordings").join(n.replace(['/', '\\'], "_"));
+        if let Some(p) = wav_path.parent() { let _ = std::fs::create_dir_all(p); }
+        let srt_path = wav_path.with_extension("srt");
+        let cues = Arc::new(std::sync::Mutex::new(Vec::<Cue>::new()));
+        (wav_path, srt_path, cues)
+    });
+    let rec_path = rec.as_ref().map(|(w, _, _)| w.clone());
+    let rec_cues = rec.as_ref().map(|(_, _, c)| c.clone());
+    let (stop, thread, rx) = loopback::start_capture(source, rec_path)?;
     let app2 = app.clone();
     let mgr2 = mgr.clone();
-    {
+    let saved_prev = {
         let mut m = mgr.lock().await;
-        m.stop_task_pub(); // abort 任何進行中 session（含停舊 capture thread）→ 互斥
+        m.stop_task_pub();            // abort 任何進行中 session（含停舊 capture thread）→ 互斥
+        let saved = m.finalize_record(); // 收尾上一段錄音（換來源/重 arm）
         m.bump_counter();
         let session_id = m.session_id_str();
         m.reset_cancel();
         m.set_data_dir(data.clone());
         m.set_capture(stop.clone(), thread);
+        if let Some((wav_path, srt_path, cues)) = rec {
+            m.set_record(session::RecordState { cues, wav_path, srt_path });
+        }
         let cancel = m.cancel_arc();
         let transcribe = m.transcribe_flag();
         let params_h = m.params_handle();
         app.emit("sub-session-reset", SessionResetEvent { session_id: session_id.clone(), no_clock: true }).ok();
         let handle = tauri::async_runtime::spawn(async move {
-            if let Err(e) = run_loop(app2.clone(), mgr2, session_id, transcribe, params_h, data, downloading, cancel, rx, stop).await {
+            if let Err(e) = run_loop(app2.clone(), mgr2, session_id, transcribe, params_h, data, downloading, cancel, rx, stop, rec_cues).await {
                 app2.emit("sub-progress", ProgressEvent { phase: "error".into(), done: 0, total: None, message: e }).ok();
             }
         });
         m.set_task(handle);
+        saved
+    };
+    if let Some(p) = saved_prev {
+        app.emit("recording-saved", p.to_string_lossy().to_string()).ok();
     }
     Ok(())
 }
@@ -277,6 +298,7 @@ async fn run_loop(
     cancel: Arc<AtomicBool>,
     rx: std::sync::mpsc::Receiver<Vec<f32>>,
     _stop: Arc<AtomicBool>,
+    record_cues: Option<Arc<std::sync::Mutex<Vec<Cue>>>>,  // 錄製時收定稿 cue → 停止寫 SRT
 ) -> Result<(), String> {
     // 串流 server 維持 --vad OFF：內建 --vad 在 silero 判 0-speech 的窗會崩潰退出（實測一開即中），
     // 重啟＝60s 模型重載、不可行。要對齊 WhisperLive vad_filter 須走 client-side silero 預過濾（另做）。
@@ -386,6 +408,9 @@ async fn run_loop(
             for f in &o.finals {
                 app.emit("sub-cue", f).ok();
                 recent_text.push_str(&f.source_text); // 累積已定稿（已過 collapse，不會灌重複牆）
+            }
+            if let Some(cues) = &record_cues {           // 錄製：定稿 cue 收進 SRT buffer（停止時寫檔）
+                cues.lock().unwrap_or_else(|e| e.into_inner()).extend(o.finals.iter().cloned());
             }
             recent_text = tail_chars(&recent_text, RECENT_CONTEXT_CHARS);
             if let Some(it) = &o.interim { app.emit("sub-cue", it).ok(); }

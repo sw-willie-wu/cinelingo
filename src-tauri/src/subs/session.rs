@@ -78,6 +78,16 @@ pub struct Manager {
     capture_thread: Option<std::thread::JoinHandle<()>>,
     transcribe_enabled: Arc<AtomicBool>,
     transcribe_params: Arc<std::sync::Mutex<Option<TranscribeParams>>>,
+    // 錄製擷取：run_loop 串流寫 WAV + 累積定稿 cue；停止路徑（disarm/重 arm/shutdown）finalize。
+    record: Option<RecordState>,
+}
+
+/// 錄製狀態：WAV 由 capture 執行緒串流寫（源取樣率，停止時自行 finalize）；此處只持
+/// 字幕定稿 cue 累積（run_loop append）+ 輸出路徑（停止時寫 SRT、回報已存檔）。
+pub(crate) struct RecordState {
+    pub cues: Arc<std::sync::Mutex<Vec<Cue>>>,
+    pub wav_path: PathBuf,
+    pub srt_path: PathBuf,
 }
 
 impl Default for Manager {
@@ -97,6 +107,7 @@ impl Default for Manager {
             capture_thread: None,
             transcribe_enabled: Arc::new(AtomicBool::new(false)),
             transcribe_params: Arc::new(std::sync::Mutex::new(None)),
+            record: None,
         }
     }
 }
@@ -134,6 +145,7 @@ impl Manager {
     /// 完全停用：停任務 + 殺 server + 掃暫存。
     pub async fn shutdown(&mut self) {
         self.stop_task();
+        let _ = self.finalize_record(); // 收尾任何進行中的錄音（app 關閉/完全停止；無 emit）
         self.loaded_model = None;
         self.loaded_vad = None;
         if let Some(s) = self.server.take() {
@@ -178,6 +190,23 @@ impl Manager {
     pub fn params_handle(&self) -> Arc<std::sync::Mutex<Option<TranscribeParams>>> { self.transcribe_params.clone() }
     pub fn set_transcribe(&self, on: bool) { self.transcribe_enabled.store(on, Ordering::SeqCst); }
     pub fn set_transcribe_params(&self, p: TranscribeParams) { *self.transcribe_params.lock().unwrap() = Some(p); }
+
+    // 錄製 accessors（stream::start 設定、run_loop 寫入、停止路徑 finalize）
+    pub(crate) fn set_record(&mut self, state: RecordState) {
+        self.record = Some(state);
+    }
+    /// finalize 錄製：寫 SRT + 回 WAV 路徑供前端 emit。須先 stop_task（join capture 執行緒，
+    /// 屆時 WAV 已由該執行緒 finalize；沒錄到音它會自刪）。WAV 不存在 → 視為空、回 None。
+    pub(crate) fn finalize_record(&mut self) -> Option<PathBuf> {
+        let st = self.record.take()?;
+        let recorded = std::fs::metadata(&st.wav_path).map(|m| m.len() > 44).unwrap_or(false);
+        if !recorded { return None; } // capture 執行緒因 0 samples 已刪空檔
+        let cues = st.cues.lock().unwrap_or_else(|e| e.into_inner());
+        if !cues.is_empty() {
+            let _ = std::fs::write(&st.srt_path, cache::cues_to_srt(&cues)); // CC 開過才有字幕
+        }
+        Some(st.wav_path)
+    }
 }
 
 pub async fn start(
