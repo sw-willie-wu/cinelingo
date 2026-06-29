@@ -14,6 +14,8 @@ const player = {
   onEndFile: vi.fn((cb) => { endCb = cb }),
   onFileLoaded: vi.fn((cb) => { fileLoadedCb = cb }),
   onStartFile: vi.fn((cb) => { startFileCb = cb }),
+  closeMedia: vi.fn(async () => {}),
+  isIdle: { value: false },   // 播放中預設；停止後測試會改成 true
 }
 const recent = { record: vi.fn(), load: vi.fn(), refreshMissing: vi.fn(), items: [] }
 vi.mock('../player/usePlayer', () => ({ usePlayer: () => player }))
@@ -33,6 +35,7 @@ beforeEach(() => {
   vi.clearAllMocks()
   // clearAllMocks 只清呼叫歷史、不清 mockImplementation → 重設 resolveRemote 預設，避免競態測試的 deferred impl 外洩。
   ;(resolveRemote as any).mockImplementation(async () => ({ playbackUrl: 'u', httpHeaders: {}, isLive: false }))
+  player.isIdle.value = false   // clearAllMocks 不清純物件 → 手動重置避免跨測試外洩
   useQueue().clear()
 })
 
@@ -79,6 +82,15 @@ describe('enqueueItems', () => {
     expect(player.loadPath).toHaveBeenCalledWith('only')
     expect(q.state.index).toBe(0)
   })
+  it('停止後(player idle) 拖入新項 → 自動播（即使佇列非空、非 ended）', async () => {
+    const q = useQueue()
+    await q.enqueueItems([L('a')])               // 播 a
+    player.loadPath.mockClear()
+    player.isIdle.value = true                   // 模擬按停止 → path=null → idle
+    await q.enqueueItems([L('b')])               // 非空但 idle → 自動播 b
+    expect(player.loadPath).toHaveBeenCalledWith('b')
+    expect(q.state.index).toBe(1)
+  })
   it('noAutoplay suppresses autoplay on empty queue', async () => {
     const q = useQueue()
     await q.enqueueItems([L('a')], { noAutoplay: true })
@@ -114,6 +126,14 @@ describe('next / remove / move', () => {
     q.remove(1)                                  // 移除 b → c 補到 index 1 並播
     expect(q.items.map((x) => x.id)).toEqual(['a', 'c'])
     expect(player.loadPath).toHaveBeenCalledWith('c')
+  })
+  it('remove 唯一(current)項 → 停止播放、index=-1', async () => {
+    const q = useQueue()
+    await q.enqueueItems([L('a')])               // 播 a（唯一項、current）
+    q.remove(0)
+    expect(q.items.length).toBe(0)
+    expect(q.state.index).toBe(-1)
+    expect(player.closeMedia).toHaveBeenCalled()
   })
   it('remove 在 current 之後 → index 不變、不重播', async () => {
     const q = useQueue()

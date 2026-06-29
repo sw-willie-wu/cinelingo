@@ -68,12 +68,15 @@ async function enqueueItems(
   opts?: { startOffset?: number; interrupt?: boolean; noAutoplay?: boolean },
 ): Promise<void> {
   if (newItems.length === 0) return
+  const player = usePlayer()
   const wasEmpty = items.length === 0
   const base = items.length
   items.push(...newItems)                  // 一律 append（Q1：清單也 append、不取代）
   const off = opts?.startOffset ?? 0
   let target: number | null = null
-  if ((wasEmpty || ended) && !opts?.noAutoplay) target = base + off  // 空佇列 或 已播完 且非 noAutoplay → 自動播進入點
+  // 空佇列 / 已播完(eof) / 目前沒在播(停止後 idle) 且非 noAutoplay → 自動播進入點。
+  // isIdle 補掉「按停止後 ended 不會被設(end-file reason=stop 被忽略) → 新拖入只 append 不播」的洞。
+  if ((wasEmpty || ended || player.isIdle.value) && !opts?.noAutoplay) target = base + off
   else if (opts?.interrupt) target = base + off  // 非空＋interrupt：跳到新加入項（最近點擊）
   // else（非空、播放中、不 interrupt；或 noAutoplay）→ 只 append、不打斷
   if (target != null) await playAt(target)
@@ -85,7 +88,7 @@ function remove(i: number): void {
   items.splice(i, 1)
   if (i < state.index) state.index--
   if (wasCurrent) {
-    if (items.length === 0) state.index = -1
+    if (items.length === 0) { state.index = -1; void usePlayer().closeMedia() }  // 刪掉正在播的唯一項 → 停止播放回首頁
     else void playAt(Math.min(i, items.length - 1))   // 以「移除後同位置項」遞補
   }
 }
