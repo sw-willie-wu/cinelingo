@@ -3,6 +3,7 @@
 use super::cue::{derive_cue_id, Cue};
 use super::{hallucination, session, whisper, ProgressEvent, SessionResetEvent};
 use crate::capture::loopback;
+use crate::subs::silero::{boundary_threshold_sec, vad_threshold_to_prob, VadGate};
 use crate::subs::translate::Translator;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -63,7 +64,6 @@ pub fn collapse_repetition(text: &str) -> String {
 pub const NO_SPEECH_COMMIT: f64 = 0.45;     // commit gate（§3.3）
 pub const AGREEMENT_THRESH: u32 = 5;        // T2 末段(collapsed)不變輪數
 pub const FORCE_COMMIT_SEC: f64 = 30.0;     // T4 安全 cap
-pub const FINALIZE_SILENCE_SEC: f64 = 0.7;  // T3 句末靜音門檻（遲滯、獨立於短 gate）
 // SILENCE_KEEP_SEC / MIN_SPEECH_BUFFER_SEC 沿用既有
 
 // 回灌近期已定稿文字當 prompt（對齊 WhisperLive condition_on_previous_text）：上限字元數。
@@ -228,11 +228,6 @@ pub fn vad_threshold_to_rms(threshold: f64) -> f32 {
     (threshold * 0.02) as f32
 }
 
-/// 斷句靜音門檻 (ms) → 靜音收句窗(秒)。下限 0.05 為 footgun guard（0 → tail n=0 → 永不轉寫）。純函式。
-pub fn min_silence_to_window(ms: i64) -> f64 {
-    (ms as f64 / 1000.0).max(0.05)
-}
-
 /// 啟動串流 session（arm）：互斥（走 Manager.task）、起擷取執行緒、spawn run_loop（drain-only 初始）。
 /// 由 arm_audio_source 傳入 AudioSource。
 pub async fn start(
@@ -319,6 +314,7 @@ async fn run_loop(
     let mut held: Option<HeldInterim> = None;
     let mut recent_text = String::new(); // 滾動近期已定稿文字（prompt 上下文，per-session 起空）
     let mut server_ready = false;
+    let mut vad_gate: Option<VadGate> = None;
     const MAX_INFLIGHT_TRANSLATIONS: usize = 3;
     let xlate_sem = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_INFLIGHT_TRANSLATIONS));
     let mut translator_warming = false;
@@ -382,25 +378,46 @@ async fn run_loop(
             offset_sec = captured_sec;
             frames.clear();
             recent_text.clear();
+            // VAD：CC 重開重置——清 NN 狀態 + last_speech_sec 對齊 captured_sec
+            // （否則長 CC-off 後 trailing_silence 巨大 → 首句立刻假觸發 silence_boundary）。
+            // 初始門檻用預設；實際門檻每輪由 set_thresholds 依 UI 靈敏度更新（見下）。
+            last_speech_sec = captured_sec;
+            match vad_gate.as_mut() {
+                Some(g) => g.reset(),
+                None => match VadGate::new(0.5, 0.35, 2) {
+                    Ok(g) => vad_gate = Some(g),
+                    Err(e) => eprintln!("[stream] VadGate 建立失敗（loopback 斷句退回 RMS、字幕仍走）：{e}"),
+                },
+            }
         }
 
         let http = { mgr.lock().await.http_clone().ok_or("no http")? };
         let (lang, prompt, model) = active.as_ref().unwrap().clone();
-        // 從 params_h 讀最新的 vad 參數（每輪重讀以支援動態調整）
-        let (rms_thresh, silence_window) = {
+        // 每輪讀 UI VAD 參數（即時生效）：靈敏度→gate 門檻、靜音時長→句界門檻。
+        let (sp_live, msil_live) = {
             let lock = params_h.lock().unwrap();
             match lock.as_ref() {
-                Some(p) => (vad_threshold_to_rms(p.vad_threshold), min_silence_to_window(p.vad_min_silence_ms)),
-                None => (vad_threshold_to_rms(0.5), min_silence_to_window(100)),
+                Some(p) => (vad_threshold_to_prob(p.vad_threshold), p.vad_min_silence_ms),
+                None => (vad_threshold_to_prob(0.5), 100),
             }
         };
-
+        if let Some(g) = vad_gate.as_mut() {
+            g.set_thresholds(sp_live, (sp_live - 0.15_f32).max(0.05_f32)); // neg 恆 < sp
+        }
+        // VAD 驅動斷句（取代 RMS）：餵本輪新樣本給 gate，得本輪是否含語音框。
+        let speech_in_tick = match vad_gate.as_mut() {
+            Some(g) => {
+                let start = frames.len().saturating_sub(got);
+                g.push(&frames[start..])
+            }
+            None => loopback::tail_has_speech(&frames, 0.1, vad_threshold_to_rms(0.5)), // 退路：gate 沒建成
+        };
         let buffer_len = frames.len() as f64 / rate;
-        let tail_speech = buffer_len >= MIN_SPEECH_BUFFER_SEC
-            && loopback::tail_has_speech(&frames, silence_window, rms_thresh);
+        let tail_speech = buffer_len >= MIN_SPEECH_BUFFER_SEC && speech_in_tick;
         if tail_speech { last_speech_sec = captured_sec; }
         let trailing_silence = captured_sec - last_speech_sec;
-        let silence_boundary = trailing_silence >= FINALIZE_SILENCE_SEC && held.is_some();
+        let boundary_sec = boundary_threshold_sec(msil_live);
+        let silence_boundary = trailing_silence >= boundary_sec && held.is_some();
 
         // 靜態 steering + 近期已定稿文字 → 條件化解碼（同音字/專有名詞一致性）。
         let combined_prompt = build_prompt(&prompt, &recent_text);
@@ -464,7 +481,7 @@ async fn run_loop(
             let drop = samples_to_drop(offset_sec, target, rate, frames.len());
             if drop > 0 { frames.drain(0..drop); offset_sec = target; }
         }
-        // else：line_active 但 trailing_silence < FINALIZE_SILENCE_SEC → 純等待（不轉寫、不 trim，避免微停頓誤切）
+        // else：line_active 但 trailing_silence < boundary_sec（vad_min_silence_ms）→ 純等待（不轉寫、不 trim，避免微停頓誤切）
 
         tokio::time::sleep(std::time::Duration::from_millis(CADENCE_MS)).await;
     }
@@ -480,14 +497,6 @@ mod tests {
         assert!((vad_threshold_to_rms(0.5) - 0.01).abs() < 1e-6);
         assert!((vad_threshold_to_rms(1.0) - 0.02).abs() < 1e-6);
         assert_eq!(vad_threshold_to_rms(0.0), 0.0);
-    }
-
-    #[test]
-    fn min_silence_maps_with_floor() {
-        assert!((min_silence_to_window(100) - 0.1).abs() < 1e-9);
-        assert!((min_silence_to_window(700) - 0.7).abs() < 1e-9);
-        assert!((min_silence_to_window(0) - 0.05).abs() < 1e-9);   // footgun guard
-        assert!((min_silence_to_window(30) - 0.05).abs() < 1e-9);  // < floor → floor
     }
 
     #[test]

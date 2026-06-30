@@ -13,6 +13,7 @@ pub mod vad;
 pub mod hallucination;
 pub mod stream;
 pub mod translate;
+pub mod silero;
 
 use serde::Serialize;
 use std::collections::HashSet;
