@@ -132,17 +132,29 @@ pub const GGUF_GEMMA_4B: Asset = Asset {
 pub fn llama_backend_asset(b: Backend) -> Asset {
     match b {
         Backend::Cuda => Asset {
-            url: "https://github.com/ggml-org/llama.cpp/releases/latest/download/llama-bin-win-cuda-x64.zip",
+            url: "https://github.com/ggml-org/llama.cpp/releases/download/b9843/llama-b9843-bin-win-cuda-12.4-x64.zip",
             sha256: "<SKIP>",
             filename: "llama-cuda.zip",
             is_zip: true,
         },
         _ => Asset {
-            url: "https://github.com/ggml-org/llama.cpp/releases/latest/download/llama-bin-win-cpu-x64.zip",
+            url: "https://github.com/ggml-org/llama.cpp/releases/download/b9843/llama-b9843-bin-win-cpu-x64.zip",
             sha256: "<SKIP>",
             filename: "llama-cpu.zip",
             is_zip: true,
         },
+    }
+}
+
+/// CUDA runtime DLL（與 llama-cuda binaries 分開發佈，CUDA 必需）。
+/// cudart64_12.dll 等不含於 binaries zip → 須另抓並解到同一 llm_dir。
+#[allow(dead_code)] // consumed by ensure_llm_assets (CUDA path)
+pub fn cudart_asset() -> Asset {
+    Asset {
+        url: "https://github.com/ggml-org/llama.cpp/releases/download/b9843/cudart-llama-bin-win-cuda-12.4-x64.zip",
+        sha256: "<SKIP>",
+        filename: "cudart.zip",
+        is_zip: true,
     }
 }
 
@@ -376,6 +388,13 @@ pub async fn ensure_llm_assets(
             }
         }
     }
+    // CUDA 需要額外的 runtime DLL（binaries zip 不含）；解到同一 llm_dir 讓 llama-server.exe 能找到。
+    if matches!(backend, Backend::Cuda) && !llm_dir.join("cudart64_12.dll").exists() {
+        let cud = cudart_asset();
+        let zip = download_verify(&cud, llm_dir, &mut on_progress).await?;
+        unzip(&zip, llm_dir)?;
+        let _ = tokio::fs::remove_file(&zip).await;
+    }
     let exe = find_exe(llm_dir, "llama-server.exe").ok_or("llama-server.exe 缺")?;
     let gguf = llm_dir.join(GGUF_GEMMA_4B.filename);
     if !gguf.exists() {
@@ -430,6 +449,15 @@ mod tests {
         assert_eq!(asset_size_mb("vad", "cpu"), SIZE_MB_VAD);
         assert_eq!(asset_size_mb("ffmpeg", "cpu"), SIZE_MB_FFMPEG);
         assert_eq!(asset_size_mb("bogus", "cpu"), 0);
+    }
+
+    #[test]
+    fn cudart_asset_has_versioned_url() {
+        let a = cudart_asset();
+        assert!(a.url.contains("/b9843/"), "cudart URL should be pinned to release b9843");
+        assert!(a.url.ends_with(".zip"));
+        assert_eq!(a.filename, "cudart.zip");
+        assert!(a.is_zip);
     }
 
     #[test]
