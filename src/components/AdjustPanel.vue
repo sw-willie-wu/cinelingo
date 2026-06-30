@@ -16,13 +16,11 @@ import NormalizeScreen from './adjust/NormalizeScreen.vue'
 import AudioDelayScreen from './adjust/AudioDelayScreen.vue'
 import SubtitleTrackScreen from './adjust/SubtitleTrackScreen.vue'
 import AudioSourceScreen from './adjust/AudioSourceScreen.vue'
-import TranslateScreen from './adjust/TranslateScreen.vue'
 import PlayerIcon from './PlayerIcon.vue'
-import { LANGS } from '../player/langs'
 
 defineProps<{ open: boolean }>()
 const emit = defineEmits<{ close: [] }>()
-type Screen = 'root' | 'speed' | 'quality' | 'image' | 'eq' | 'normalize' | 'audiodelay' | 'primary' | 'secondary' | 'audiosource' | 'translate'
+type Screen = 'root' | 'speed' | 'quality' | 'image' | 'eq' | 'normalize' | 'audiodelay' | 'primary' | 'secondary' | 'audiosource'
 const screen = ref<Screen>('root')
 const player = usePlayer()
 const { speed } = useSpeed()
@@ -49,10 +47,6 @@ function audioSourceLabel(): string {
   if (cur.kind === 'system') return '系統輸出'
   if (cur.kind === 'process') return cur.name
   return '麥克風'
-}
-function translateLabel(): string {
-  const v = settings.state.liveSubs.translateTo
-  return LANGS.find((l) => l.value === v)?.label ?? v
 }
 function trackLabel(track: 'primary' | 'secondary'): string {
   const s = subs.tracks[track].source
@@ -88,11 +82,6 @@ function stopPlayback() { void player.closeMedia(); close() }
         <div class="item" :class="{ disabled: secondaryDisabled }" @click="!secondaryDisabled && go('secondary')">
           <span class="ic"><PlayerIcon name="tracks" :size="18" /></span><span class="nm">第二字幕</span><span class="cur">{{ secondaryDisabled ? '需先開主字幕' : trackLabel('secondary') }}</span><span class="gt">›</span>
         </div>
-        <div class="item" @click="go('translate')">
-          <span class="ic"><PlayerIcon name="captions-live" :size="18" /></span>
-          <span class="nm">即時翻譯</span>
-          <span class="cur">{{ settings.state.liveSubs.translateEnabled ? translateLabel() : '關' }}</span><span class="gt">›</span>
-        </div>
       </template>
       <SpeedScreen v-else-if="screen === 'speed'" @back="go('root')" />
       <QualityScreen v-else-if="screen === 'quality'" @back="go('root')" />
@@ -103,7 +92,6 @@ function stopPlayback() { void player.closeMedia(); close() }
       <SubtitleTrackScreen v-else-if="screen === 'primary'" track="primary" @back="go('root')" />
       <SubtitleTrackScreen v-else-if="screen === 'secondary'" track="secondary" @back="go('root')" />
       <AudioSourceScreen v-else-if="screen === 'audiosource'" @back="go('root')" />
-      <TranslateScreen v-else-if="screen === 'translate'" @back="go('root')" />
     </div>
   </div>
 </template>

@@ -273,19 +273,29 @@ pub async fn check_translate_engine(app: tauri::AppHandle) -> Result<Vec<Missing
 }
 
 #[tauri::command]
-pub async fn provision_translate_engine(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, SubsState>,
-) -> Result<(), String> {
+pub async fn provision_translate_engine(app: tauri::AppHandle, state: tauri::State<'_, SubsState>) -> Result<(), String> {
     let data = crate::data_dir(&app)?;
     let llm = download::llm_dir(&data);
-    let hw = tauri::async_runtime::spawn_blocking(hwdetect::detect_hardware_blocking)
-        .await
-        .map_err(|e| e.to_string())?;
+    let hw = tauri::async_runtime::spawn_blocking(hwdetect::detect_hardware_blocking).await.map_err(|e| e.to_string())?;
     let backend = if hw.backend == "cuda" { hwdetect::Backend::Cuda } else { hwdetect::Backend::Cpu };
-    download::ensure_llm_assets(&app, &llm, &state.downloading, backend, session::prog_emit(app.clone(), "llm"))
-        .await
-        .map(|_| ())
+    let app_p = app.clone();
+    let on_prog = move |done: u64, total: Option<u64>| {
+        let _ = app_p.emit("model-download", ModelDownloadEvent {
+            key: "translate".into(), phase: "downloading".into(), done, total, message: None,
+        });
+    };
+    match download::ensure_llm_assets(&app, &llm, &state.downloading, backend, on_prog).await {
+        Ok(_) => {
+            let _ = app.emit("model-download", ModelDownloadEvent {
+                key: "translate".into(), phase: "done".into(), done: 0, total: None, message: None });
+            Ok(())
+        }
+        Err(e) => {
+            let _ = app.emit("model-download", ModelDownloadEvent {
+                key: "translate".into(), phase: "error".into(), done: 0, total: None, message: Some(e.clone()) });
+            Err(e)
+        }
+    }
 }
 
 #[tauri::command]
