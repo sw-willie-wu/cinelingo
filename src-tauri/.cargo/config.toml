@@ -1,0 +1,9 @@
+# Suppress ort-sys build.rs download of onnxruntime binaries at build time.
+# voice_activity_detector 0.2.1 pulls in ort =2.0.0-rc.10 without
+# default-features=false, so the `download-binaries` feature remains active and
+# ort-sys would otherwise fetch onnxruntime into %LOCALAPPDATA%/ort.pyke.io/dfbin/
+# on every clean build — stalling in offline/CI environments.
+# The actual DLL is provisioned reproducibly by `npm run setup-onnxruntime`
+# (wired into predev/prebuild) and pointed to via ORT_DYLIB_PATH set in lib.rs .setup().
+[env]
+ORT_SKIP_DOWNLOAD = "1"

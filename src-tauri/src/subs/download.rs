@@ -113,6 +113,57 @@ pub const SIZE_MB_VAD: u64 = 1; // 0.8MB 進位
 pub const SIZE_MB_BACKEND_CUDA: u64 = 439; // 438.5 進位
 pub const SIZE_MB_BACKEND_CPU: u64 = 4; // 3.9 進位
 pub const SIZE_MB_FFMPEG: u64 = 80; // TODO(impl): 下載一次量測 GyanD 8.1.1 essentials zip 後釘定真值
+#[allow(dead_code)] // consumed by Task 3+ (ensure_llm_assets callers not yet wired)
+pub const SIZE_MB_LLM_GGUF: u64 = 2500;   // gemma-3-4b Q4_K_M（之後量測釘真值）
+#[allow(dead_code)]
+pub const SIZE_MB_LLAMA_CUDA: u64 = 400;
+#[allow(dead_code)]
+pub const SIZE_MB_LLAMA_CPU: u64 = 20;
+
+#[allow(dead_code)] // consumed by Task 3+
+pub const GGUF_GEMMA_4B: Asset = Asset {
+    url: "https://huggingface.co/bartowski/google_gemma-3-4b-it-GGUF/resolve/main/google_gemma-3-4b-it-Q4_K_M.gguf",
+    sha256: "<SKIP>",
+    filename: "gemma-3-4b-it-Q4_K_M.gguf",
+    is_zip: false,
+};
+
+#[allow(dead_code)] // consumed by Task 3+
+pub fn llama_backend_asset(b: Backend) -> Asset {
+    match b {
+        Backend::Cuda => Asset {
+            url: "https://github.com/ggml-org/llama.cpp/releases/download/b9843/llama-b9843-bin-win-cuda-12.4-x64.zip",
+            sha256: "<SKIP>",
+            filename: "llama-cuda.zip",
+            is_zip: true,
+        },
+        _ => Asset {
+            url: "https://github.com/ggml-org/llama.cpp/releases/download/b9843/llama-b9843-bin-win-cpu-x64.zip",
+            sha256: "<SKIP>",
+            filename: "llama-cpu.zip",
+            is_zip: true,
+        },
+    }
+}
+
+/// CUDA runtime DLL（與 llama-cuda binaries 分開發佈，CUDA 必需）。
+/// cudart64_12.dll 等不含於 binaries zip → 須另抓並解到同一 llm_dir。
+#[allow(dead_code)] // consumed by ensure_llm_assets (CUDA path)
+pub fn cudart_asset() -> Asset {
+    Asset {
+        url: "https://github.com/ggml-org/llama.cpp/releases/download/b9843/cudart-llama-bin-win-cuda-12.4-x64.zip",
+        sha256: "<SKIP>",
+        filename: "cudart.zip",
+        is_zip: true,
+    }
+}
+
+#[allow(dead_code)] // consumed by Task 3+
+pub fn llm_dir(data_root: &Path) -> PathBuf { data_root.join("llm") }
+#[allow(dead_code)] // consumed by Task 3+
+pub fn translate_model_downloaded(llm_dir: &Path) -> bool { llm_dir.join(GGUF_GEMMA_4B.filename).exists() }
+#[allow(dead_code)] // consumed by Task 3+
+pub fn llama_server_downloaded(llm_dir: &Path) -> bool { find_exe(llm_dir, "llama-server.exe").is_some() }
 
 /// `subs_dir` 內是否已有任一可用模型 .bin（small/medium/turbo/large-v3）。
 pub fn any_model_downloaded(subs_dir: &Path) -> bool {
@@ -309,6 +360,60 @@ pub async fn ensure_model_file(
     }
 }
 
+/// 確保 llama-server.exe + GGUF 就緒（缺才下載），with InFlightGuard 去重。
+/// 不呼叫 ensure_model_file（whisper-寫死路徑），直接走 download_verify 新路徑。
+#[allow(dead_code)] // consumed by Task 3+
+pub async fn ensure_llm_assets(
+    app: &AppHandle,
+    llm_dir: &Path,
+    downloading: &Arc<Mutex<HashSet<String>>>,
+    backend: Backend,
+    mut on_progress: impl FnMut(u64, Option<u64>),
+) -> Result<(PathBuf, PathBuf), String> {
+    tokio::fs::create_dir_all(llm_dir).await.map_err(|e| e.to_string())?;
+    if find_exe(llm_dir, "llama-server.exe").is_none() {
+        let key = "llm-server".to_string();
+        let claimed = downloading.lock().map_err(|e| e.to_string())?.insert(key.clone());
+        if claimed {
+            let _g = InFlightGuard { set: downloading.clone(), key: key.clone() };
+            let asset = llama_backend_asset(backend);
+            let zip = download_verify(&asset, llm_dir, &mut on_progress).await?;
+            unzip(&zip, llm_dir)?;
+            let _ = tokio::fs::remove_file(&zip).await;
+            emit_md(app, &key, "done", 0, None, None);
+        } else {
+            for _ in 0..600 {
+                if find_exe(llm_dir, "llama-server.exe").is_some() { break; }
+                tokio::time::sleep(Duration::from_millis(300)).await;
+            }
+        }
+    }
+    // CUDA 需要額外的 runtime DLL（binaries zip 不含）；解到同一 llm_dir 讓 llama-server.exe 能找到。
+    if matches!(backend, Backend::Cuda) && !llm_dir.join("cudart64_12.dll").exists() {
+        let cud = cudart_asset();
+        let zip = download_verify(&cud, llm_dir, &mut on_progress).await?;
+        unzip(&zip, llm_dir)?;
+        let _ = tokio::fs::remove_file(&zip).await;
+    }
+    let exe = find_exe(llm_dir, "llama-server.exe").ok_or("llama-server.exe 缺")?;
+    let gguf = llm_dir.join(GGUF_GEMMA_4B.filename);
+    if !gguf.exists() {
+        let key = "llm-model".to_string();
+        let claimed = downloading.lock().map_err(|e| e.to_string())?.insert(key.clone());
+        if claimed {
+            let _g = InFlightGuard { set: downloading.clone(), key: key.clone() };
+            download_verify(&GGUF_GEMMA_4B, llm_dir, &mut on_progress).await?;
+            emit_md(app, &key, "done", 0, None, None);
+        } else {
+            for _ in 0..1200 {
+                if gguf.exists() { break; }
+                tokio::time::sleep(Duration::from_millis(300)).await;
+            }
+        }
+    }
+    Ok((exe, gguf))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -344,5 +449,25 @@ mod tests {
         assert_eq!(asset_size_mb("vad", "cpu"), SIZE_MB_VAD);
         assert_eq!(asset_size_mb("ffmpeg", "cpu"), SIZE_MB_FFMPEG);
         assert_eq!(asset_size_mb("bogus", "cpu"), 0);
+    }
+
+    #[test]
+    fn cudart_asset_has_versioned_url() {
+        let a = cudart_asset();
+        assert!(a.url.contains("/b9843/"), "cudart URL should be pinned to release b9843");
+        assert!(a.url.ends_with(".zip"));
+        assert_eq!(a.filename, "cudart.zip");
+        assert!(a.is_zip);
+    }
+
+    #[test]
+    fn llm_downloaded_checks_filenames() {
+        let dir = std::env::temp_dir().join(format!("lmpv-llm-{}", std::process::id()));
+        let llm = llm_dir(&dir);
+        std::fs::create_dir_all(&llm).unwrap();
+        assert!(!translate_model_downloaded(&llm));
+        std::fs::write(llm.join(GGUF_GEMMA_4B.filename), b"x").unwrap();
+        assert!(translate_model_downloaded(&llm));
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

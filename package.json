@@ -5,9 +5,10 @@
   "type": "module",
   "scripts": {
     "setup-libmpv": "node scripts/setup-libmpv.mjs",
-    "predev": "node scripts/setup-libmpv.mjs && node scripts/copy-libmpv.mjs",
+    "setup-onnxruntime": "node scripts/setup-onnxruntime.mjs",
+    "predev": "node scripts/setup-libmpv.mjs && node scripts/setup-onnxruntime.mjs && node scripts/copy-libmpv.mjs",
     "dev": "vite",
-    "prebuild": "node scripts/setup-libmpv.mjs",
+    "prebuild": "node scripts/setup-libmpv.mjs && node scripts/setup-onnxruntime.mjs",
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview",
     "tauri": "tauri",

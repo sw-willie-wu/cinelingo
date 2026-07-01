@@ -14,6 +14,9 @@ interface ModelDownloadEvent {
   message: string | null
 }
 
+// 真實 whisper 模型 key（自動選模只對這些有效；LLM 引擎下載的 key 不算）。
+const WHISPER_MODEL_KEYS = new Set<string>(['small', 'medium', 'turbo', 'large-v3'])
+
 // 模組層單例（跨設定 Modal 開/關存活；背景下載中關掉再開仍見進度）。
 const downloaded = reactive(new Set<string>())
 const downloading = reactive(new Map<string, { done: number; total: number | null }>())
@@ -38,14 +41,19 @@ function ensureWired(): Promise<void> {
           downloading.delete(key)
           downloaded.add(key)
           errored.delete(key)
-          const settings = useSettings()
-          const pick = nextAutoSelect(
-            settings.state.liveSubs.model,
-            downloaded,
-            key as ModelKey,
-            useSubtitles().enabled.value,
-          )
-          if (pick) settings.state.liveSubs.model = pick
+          // 只對「真實 whisper 模型 key」做自動選模；非模型 key（如 LLM 引擎下載的
+          // 'translate'/'llm-server'/'llm-model'）也會走 model-download 'done'，
+          // 但 `key as ModelKey` 對它們是不安全轉型，不可拿去寫 liveSubs.model。
+          if (WHISPER_MODEL_KEYS.has(key)) {
+            const settings = useSettings()
+            const pick = nextAutoSelect(
+              settings.state.liveSubs.model,
+              downloaded,
+              key as ModelKey,
+              useSubtitles().enabled.value,
+            )
+            if (pick) settings.state.liveSubs.model = pick
+          }
         } else {
           downloading.delete(key)
           errored.add(key)

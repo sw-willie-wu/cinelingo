@@ -113,7 +113,7 @@ function ensureWired(): Promise<void> {
       usePlayer().onSeek((sec: number) => { if (liveNeeded.value) invoke('notify_seek', { sec }) })
       const s = useSettings().state
       // 啟用中改 model/語言 → 重啟
-      watch(() => [s.liveSubs.model, s.liveSubs.sourceLang] as const, () => {
+      watch(() => [s.liveSubs.model, s.liveSubs.sourceLang, s.liveSubs.translateEnabled, s.liveSubs.translateTo] as const, () => {
         if (liveNeeded.value) startForCurrent().catch(() => {})
       })
       // 任一軌進/離 live → 起/停轉寫（startForCurrent 依 armed 狀態分派外部/影片路徑）
@@ -201,6 +201,7 @@ async function startForCurrent(): Promise<void> {
       promptText.value ?? '',
       s.liveSubs.vad.threshold,
       s.liveSubs.vad.minSilenceMs,
+      s.liveSubs.translateEnabled ? s.liveSubs.translateTo : undefined,
     )
     return
   }

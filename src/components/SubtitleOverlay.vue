@@ -4,7 +4,7 @@ import { useSubtitles, type TrackName } from '../player/useSubtitles'
 import { usePlayer } from '../player/usePlayer'
 import { useSettings } from '../player/useSettings'
 import { subTextStyle, scaleFontPx } from '../player/settings'
-import { liveLines, displayCharCap } from '../player/subtitles'
+import { liveLines, liveBlocks, displayCharCap } from '../player/subtitles'
 
 const subs = useSubtitles()
 const player = usePlayer()
@@ -45,6 +45,13 @@ const live = computed((): { lines: string[]; interimLines: string[] } =>
     ? liveLines(subs.liveCues.value, subs.liveInterim.value, settings.state.liveSubs.display.lines, liveCap.value)
     : { lines: [] as string[], interimLines: [] as string[] }
 )
+const translateOn = computed(() => settings.state.liveSubs.translateEnabled)
+const blocks = computed(() =>
+  subs.noClock.value && translateOn.value
+    ? liveBlocks(subs.liveCues.value, subs.liveInterim.value, settings.state.liveSubs.display.lines, liveCap.value)
+    : []
+)
+const secStyle = computed(() => subTextStyle(settings.state.appearance.secondary, winH.value))
 
 // 閒置偵測（僅 loopback）：超過 IDLE_MS 沒新字幕 → 清掉最後字幕（與浮動字幕一致；句間空檔不殘留）。
 const IDLE_MS = 4000
@@ -60,11 +67,20 @@ const idle = computed(() => now.value - lastActivity > IDLE_MS)
 <template>
   <!-- no-clock (loopback)：多行 last-N final + interim（較淡） -->
   <div
-    v-if="subs.noClock.value && (live.lines.length || live.interimLines.length) && !idle"
+    v-if="subs.noClock.value && (translateOn ? blocks.length : (live.lines.length || live.interimLines.length)) && !idle"
     class="sub-overlay"
     :style="p.overlayStyle.value"
   >
-    <span class="sub-text" :style="p.textStyle.value"
+    <!-- translate 開：逐 block（原文行 + 譯文行） -->
+    <span v-if="translateOn" class="sub-text" :style="p.textStyle.value">
+      <template v-for="b in blocks" :key="b.id">
+        <span :class="{ interim: b.interim }">{{ b.sourceLines.join('\n') }}</span>
+        <span v-if="b.target" class="xlate" :style="secStyle">{{ '\n' + b.target }}</span>
+        <span>{{ '\n' }}</span>
+      </template>
+    </span>
+    <!-- translate 關：既有扁平 lines（位元不變） -->
+    <span v-else class="sub-text" :style="p.textStyle.value"
       ><span v-if="live.lines.length">{{ live.lines.join('\n') }}</span
       ><span v-if="live.interimLines.length" class="interim">{{ (live.lines.length ? '\n' : '') + live.interimLines.join('\n') }}</span></span
     >

@@ -6,7 +6,7 @@ import { useSettings } from '../player/useSettings'
 import { useFloatingMode } from '../player/useFloatingMode'
 import { usePlayer } from '../player/usePlayer'
 import { subTextStyle, scaleFontPx } from '../player/settings'
-import { liveLines, displayCharCap } from '../player/subtitles'
+import { liveLines, liveBlocks, displayCharCap } from '../player/subtitles'
 
 const subs = useSubtitles()
 const settings = useSettings()
@@ -40,6 +40,13 @@ const live = computed(() =>
     ? liveLines(subs.liveCues.value, subs.liveInterim.value, settings.state.liveSubs.display.lines, cap.value)
     : { lines: [] as string[], interimLines: [] as string[] }
 )
+const translateOn = computed(() => settings.state.liveSubs.translateEnabled)
+const blocks = computed(() =>
+  isLoopback.value && translateOn.value
+    ? liveBlocks(subs.liveCues.value, subs.liveInterim.value, settings.state.liveSubs.display.lines, cap.value)
+    : []
+)
+const secStyle = computed(() => subTextStyle(settings.state.appearance.secondary, FONT_REF_H))
 const clockText = computed(() => (isLoopback.value ? '' : subs.activeText('primary', t.value)))
 const clockTranscribing = computed(() => !isLoopback.value && subs.isTranscribing('primary', t.value))
 
@@ -47,7 +54,9 @@ const clockTranscribing = computed(() => !isLoopback.value && subs.isTranscribin
 // 時鐘字幕模式的句間空檔屬正常，不顯示待命提示（避免安靜片段一直閃）。
 const IDLE_MS = 4000
 const hasContent = computed(() =>
-  isLoopback.value ? (live.value.lines.length > 0 || live.value.interimLines.length > 0) : !!clockText.value
+  isLoopback.value
+    ? (translateOn.value ? blocks.value.length > 0 : (live.value.lines.length > 0 || live.value.interimLines.length > 0))
+    : !!clockText.value
 )
 const now = ref(Date.now())
 let lastActivity = Date.now()
@@ -93,10 +102,21 @@ function onResizeEast() { dragging.value = true; win.startResizeDragging('East')
     </Transition>
     <div class="cap-area">
       <!-- loopback（外部內容）：多行 final + interim -->
-      <span v-if="isLoopback && showCaption" class="cap-text" :style="textStyle"
-        ><span v-if="live.lines.length">{{ live.lines.join('\n') }}</span
-        ><span v-if="live.interimLines.length" class="interim">{{ (live.lines.length ? '\n' : '') + live.interimLines.join('\n') }}</span></span
-      >
+      <span v-if="isLoopback && showCaption" class="cap-text" :style="textStyle">
+        <!-- translate 開：逐 block（原文行 + 譯文行） -->
+        <template v-if="translateOn">
+          <template v-for="b in blocks" :key="b.id">
+            <span :class="{ interim: b.interim }">{{ b.sourceLines.join('\n') }}</span>
+            <span v-if="b.target" class="xlate" :style="secStyle">{{ '\n' + b.target }}</span>
+            <span>{{ '\n' }}</span>
+          </template>
+        </template>
+        <!-- translate 關：既有扁平 lines（位元不變） -->
+        <template v-else
+          ><span v-if="live.lines.length">{{ live.lines.join('\n') }}</span
+          ><span v-if="live.interimLines.length" class="interim">{{ (live.lines.length ? '\n' : '') + live.interimLines.join('\n') }}</span></template
+        >
+      </span>
       <!-- 時鐘字幕（沿用既有：字幕檔 / mode A 即時字幕）：當下該句 -->
       <span v-else-if="!isLoopback && showCaption" class="cap-text" :style="textStyle">{{ clockText }}</span>
       <!-- mode A 即時字幕還沒追上 -->

@@ -144,6 +144,26 @@ export function liveLines(
   return { lines, interimLines }
 }
 
+export interface LiveBlock { id: string; sourceLines: string[]; target?: string; interim?: boolean }
+
+/** translate 模式的結構化渲染：以 cue 為單位（保留 id/targetText），取最後 n 條 final + 末端 interim。 */
+export function liveBlocks(
+  finals: readonly Cue[],
+  interim: Cue | null,
+  n: number,
+  cap: number = MAX_PHRASE_CHARS,
+): LiveBlock[] {
+  const out: LiveBlock[] = []
+  const recent = n > 0 ? finals.slice(-n) : []
+  for (const c of recent) {
+    out.push({ id: c.id, sourceLines: splitFinalLines(c.sourceText), target: c.targetText })
+  }
+  if (interim && interim.sourceText.trim() !== '') {
+    out.push({ id: interim.id, sourceLines: splitDisplayPhrases(interim.sourceText, cap), interim: true })
+  }
+  return out
+}
+
 // 去除常見行內標記：HTML 樣式標籤、VTT 的 <v ...>/<c...>、SRT 的 {\anX} 等定位碼。
 function stripMarkup(s: string): string {
   return s.replace(/<[^>]+>/g, '').replace(/\{\\[^}]*\}/g, '').trim()

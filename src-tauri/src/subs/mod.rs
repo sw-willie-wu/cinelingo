@@ -12,6 +12,8 @@ pub mod remote;
 pub mod vad;
 pub mod hallucination;
 pub mod stream;
+pub mod translate;
+pub mod silero;
 
 use serde::Serialize;
 use std::collections::HashSet;
@@ -228,6 +230,7 @@ pub async fn start_external_transcription(
     prompt: String,
     vad_threshold: f64,
     vad_min_silence_ms: i64,
+    target_lang: Option<String>,
 ) -> Result<(), String> {
     if source_lang == "auto" || source_lang.is_empty() {
         return Err("即時辨識需指定明確語言（非自動）".into());
@@ -235,6 +238,7 @@ pub async fn start_external_transcription(
     let m = state.inner.lock().await;
     m.set_transcribe_params(session::TranscribeParams {
         model, source_lang, prompt, vad_threshold, vad_min_silence_ms,
+        target_lang: target_lang.filter(|s| !s.is_empty()),
     });
     m.set_transcribe(true);
     Ok(())
@@ -244,6 +248,55 @@ pub async fn start_external_transcription(
 pub async fn stop_external_transcription(state: tauri::State<'_, SubsState>) -> Result<(), String> {
     state.inner.lock().await.set_transcribe(false);
     Ok(())
+}
+
+#[tauri::command]
+pub async fn translate_engine_ready(app: tauri::AppHandle) -> Result<bool, String> {
+    let llm = download::llm_dir(&crate::data_dir(&app)?);
+    Ok(download::llama_server_downloaded(&llm) && download::translate_model_downloaded(&llm))
+}
+
+#[tauri::command]
+pub async fn check_translate_engine(app: tauri::AppHandle) -> Result<Vec<MissingAsset>, String> {
+    let llm = download::llm_dir(&crate::data_dir(&app)?);
+    let hw = tauri::async_runtime::spawn_blocking(hwdetect::detect_hardware_blocking)
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut missing = Vec::new();
+    if !download::llama_server_downloaded(&llm) {
+        let sz = if hw.backend == "cuda" { download::SIZE_MB_LLAMA_CUDA } else { download::SIZE_MB_LLAMA_CPU };
+        missing.push(MissingAsset { kind: "llmServer".into(), size_mb: sz });
+    }
+    if !download::translate_model_downloaded(&llm) {
+        missing.push(MissingAsset { kind: "llmModel".into(), size_mb: download::SIZE_MB_LLM_GGUF });
+    }
+    Ok(missing)
+}
+
+#[tauri::command]
+pub async fn provision_translate_engine(app: tauri::AppHandle, state: tauri::State<'_, SubsState>) -> Result<(), String> {
+    let data = crate::data_dir(&app)?;
+    let llm = download::llm_dir(&data);
+    let hw = tauri::async_runtime::spawn_blocking(hwdetect::detect_hardware_blocking).await.map_err(|e| e.to_string())?;
+    let backend = if hw.backend == "cuda" { hwdetect::Backend::Cuda } else { hwdetect::Backend::Cpu };
+    let app_p = app.clone();
+    let on_prog = move |done: u64, total: Option<u64>| {
+        let _ = app_p.emit("model-download", ModelDownloadEvent {
+            key: "translate".into(), phase: "downloading".into(), done, total, message: None,
+        });
+    };
+    match download::ensure_llm_assets(&app, &llm, &state.downloading, backend, on_prog).await {
+        Ok(_) => {
+            let _ = app.emit("model-download", ModelDownloadEvent {
+                key: "translate".into(), phase: "done".into(), done: 0, total: None, message: None });
+            Ok(())
+        }
+        Err(e) => {
+            let _ = app.emit("model-download", ModelDownloadEvent {
+                key: "translate".into(), phase: "error".into(), done: 0, total: None, message: Some(e.clone()) });
+            Err(e)
+        }
+    }
 }
 
 #[tauri::command]

@@ -145,6 +145,16 @@ describe('settings defaults + merge', () => {
     const merged = mergeSettings({ liveSubs: { model: 'turbo' } } as any)
     expect(merged.liveSubs.audioSource).toBeNull()
   })
+  it('defaults translate off, target zh-Hant', () => {
+    const s = mergeSettings({})
+    expect(s.liveSubs.translateEnabled).toBe(false)
+    expect(s.liveSubs.translateTo).toBe('zh-Hant')
+  })
+  it('keeps valid translateTo, rejects invalid and auto', () => {
+    expect(mergeSettings({ liveSubs: { translateTo: 'ja' } }).liveSubs.translateTo).toBe('ja')
+    expect(mergeSettings({ liveSubs: { translateTo: 'zzz' } }).liveSubs.translateTo).toBe('zh-Hant')
+    expect(mergeSettings({ liveSubs: { translateTo: 'auto' } }).liveSubs.translateTo).toBe('zh-Hant')
+  })
 })
 
 describe('playback.videoOutput', () => {

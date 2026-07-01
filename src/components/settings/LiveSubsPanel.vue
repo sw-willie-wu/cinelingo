@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref, onMounted } from 'vue'
 import { useSettings } from '../../player/useSettings'
 import { useModelDownloads } from '../../player/useModelDownloads'
 import { useEngineProvision } from '../../player/useEngineProvision'
 import { rowState } from '../../player/modelRows'
 import type { ModelKey } from '../../player/settings'
 import { LANGS } from '../../player/langs'
+import { translateEngineReady, provisionTranslateEngine } from '../../player/backend'
 import GlassSelect from '../GlassSelect.vue'
 import GlassToggle from '../GlassToggle.vue'
 
@@ -51,6 +52,27 @@ function selectModel(key: ModelKey) {
 function resetVad() {
   settings.state.liveSubs.vad.threshold = 0.5
   settings.state.liveSubs.vad.minSilenceMs = 100
+}
+
+const transReady = ref(false)
+onMounted(async () => { transReady.value = await translateEngineReady().catch(() => false) })
+const translateReady = computed(() => transReady.value || md.downloaded.has('translate'))
+const transDownloading = computed(() => md.downloading.get('translate'))
+const TRANS_LANG_OPTIONS = LANGS.filter((l) => l.value !== 'auto').map((l) => ({ value: l.value, label: l.label }))
+function transBarWidth(): string {
+  const p = md.downloading.get('translate')
+  return p?.total ? `${Math.round((p.done / p.total) * 100)}%` : '0%'
+}
+function transProgText(): string {
+  const p = md.downloading.get('translate')
+  if (!p) return '下載中…'
+  if (p.total) return `${Math.round((p.done / p.total) * 100)}% · ${mb(p.done)} / ${mb(p.total)} MB`
+  return p.done ? `${mb(p.done)} MB` : '下載中…'
+}
+async function downloadTranslate() {
+  if (translateReady.value || transDownloading.value) return
+  md.downloading.set('translate', { done: 0, total: null })
+  try { await provisionTranslateEngine() } catch { md.downloading.delete('translate') }
 }
 </script>
 
@@ -130,6 +152,32 @@ function resetVad() {
         :disabled="!settings.state.liveSubs.saveSrt"
         @update:model-value="settings.state.liveSubs.overwriteOnParamChange = $event"
       />
+    </div>
+
+    <div class="sec-h">翻譯</div>
+    <div class="field">
+      <div class="lab">啟用即時翻譯<small>把聽寫字幕用本地 LLM 翻成目標語言（需先下載 ~2.9GB 引擎：llama + gemma-3-4b）</small></div>
+      <GlassToggle :model-value="settings.state.liveSubs.translateEnabled" :disabled="!translateReady" @update:model-value="settings.state.liveSubs.translateEnabled = $event" />
+    </div>
+    <div class="field">
+      <div class="lab">翻譯成<small>翻譯與聽寫共用 GPU；低於 8GB 顯卡可能不順</small></div>
+      <GlassSelect :model-value="settings.state.liveSubs.translateTo" :options="TRANS_LANG_OPTIONS" :disabled="!translateReady" @update:model-value="settings.state.liveSubs.translateTo = $event" />
+    </div>
+    <div class="row" :class="{ active: translateReady }">
+      <div class="info">
+        <div class="name">翻譯引擎（gemma-3-4b）</div>
+        <div class="desc">本地・離線 · <span class="vram">~3 GB VRAM</span></div>
+      </div>
+      <div class="act" @click.stop>
+        <span v-if="translateReady" class="badge dn">✓ 已下載</span>
+        <div v-else-if="transDownloading" class="prog">
+          <div class="bar"><div :style="{ width: transBarWidth() }"></div></div>
+          <div class="t">{{ transProgText() }}</div>
+        </div>
+        <button v-else class="icon-btn" title="下載翻譯引擎" @click="downloadTranslate">
+          <svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>
+        </button>
+      </div>
     </div>
 
     </div>

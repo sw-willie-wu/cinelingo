@@ -89,6 +89,7 @@ pub fn parse_srt_cached(text: &str) -> Vec<Cue> {
             source_text: body,
             lang: None,
             status: "final".into(),
+            ..Default::default()
         });
     }
     out
@@ -209,9 +210,9 @@ mod tests {
     fn cues_to_srt_formats_sorted() {
         let cues = vec![
             Cue { id: "x".into(), session_id: "".into(), start_sec: 60.0, end_sec: 61.5,
-                  source_text: "second".into(), lang: None, status: "final".into() },
+                  source_text: "second".into(), lang: None, status: "final".into(), ..Default::default() },
             Cue { id: "y".into(), session_id: "".into(), start_sec: 1.0, end_sec: 2.0,
-                  source_text: "first".into(), lang: None, status: "final".into() },
+                  source_text: "first".into(), lang: None, status: "final".into(), ..Default::default() },
         ];
         let srt = cues_to_srt(&cues);
         assert!(srt.starts_with("1\n00:00:01,000 --> 00:00:02,000\nfirst\n\n"));
@@ -233,9 +234,9 @@ mod tests {
     fn srt_round_trip_preserves_ids() {
         let cues = vec![
             Cue { id: derive_cue_id(10500), session_id: "s1".into(), start_sec: 10.5, end_sec: 12.0,
-                  source_text: "hi".into(), lang: Some("ja".into()), status: "final".into() },
+                  source_text: "hi".into(), lang: Some("ja".into()), status: "final".into(), ..Default::default() },
             Cue { id: derive_cue_id(60000), session_id: "s1".into(), start_sec: 60.0, end_sec: 62.0,
-                  source_text: "bye\nnow".into(), lang: None, status: "final".into() },
+                  source_text: "bye\nnow".into(), lang: None, status: "final".into(), ..Default::default() },
         ];
         let parsed = parse_srt_cached(&cues_to_srt(&cues));
         assert_eq!(parsed.len(), 2);
@@ -319,6 +320,7 @@ mod tests {
         let cues = vec![Cue {
             id: derive_cue_id(1000), session_id: "s1".into(), start_sec: 1.0, end_sec: 2.0,
             source_text: "hi".into(), lang: Some("ja".into()), status: "final".into(),
+            ..Default::default()
         }];
         write_cache(
             &srt, &json, &cues, &vec![(0.0, 30.0)], "C:/v.mkv", 120.0, Some("ja"),

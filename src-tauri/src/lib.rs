@@ -34,6 +34,26 @@ pub fn run() {
                     std::env::set_var("PATH", joined);
                 }
             }
+            // 讓 ort（load-dynamic）找到自管釘版 onnxruntime.dll。
+            // dev：copy-libmpv 已把 DLL 放 current_exe() 同層；bundle：resources["lib/**/*"] 解到 resource_dir/lib。
+            // 禁寫死 src-tauri/lib（build-time 路徑、runtime 不存在）。
+            if std::env::var_os("ORT_DYLIB_PATH").is_none() {
+                let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+                if let Ok(exe) = std::env::current_exe() {
+                    if let Some(dir) = exe.parent() {
+                        candidates.push(dir.join("onnxruntime.dll"));
+                    }
+                }
+                if let Ok(res) = app.path().resource_dir() {
+                    candidates.push(res.join("lib").join("onnxruntime.dll"));
+                    candidates.push(res.join("onnxruntime.dll"));
+                }
+                if let Some(dll) = candidates.into_iter().find(|p| p.exists()) {
+                    std::env::set_var("ORT_DYLIB_PATH", dll);
+                } else {
+                    eprintln!("[vad] 找不到 onnxruntime.dll（候選皆不存在）；loopback VAD 將無法啟動");
+                }
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -57,6 +77,9 @@ pub fn run() {
             subs::disarm_audio_source,
             subs::start_external_transcription,
             subs::stop_external_transcription,
+            subs::translate_engine_ready,
+            subs::check_translate_engine,
+            subs::provision_translate_engine,
             settings::load_settings,
             settings::save_settings,
             sub_memory::load_sub_memory,
