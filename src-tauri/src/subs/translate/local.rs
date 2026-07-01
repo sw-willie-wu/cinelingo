@@ -1,4 +1,4 @@
-use super::{build_translate_messages, postprocess_translation, target_lang_name, Translator};
+use super::{build_translate_messages, is_untranslated, postprocess_translation, source_lang_name, target_lang_name, Translator};
 use super::llama::LlamaServer;
 use async_trait::async_trait;
 use std::path::Path;
@@ -39,19 +39,20 @@ impl Translator for LocalLlmTranslator {
     async fn translate(
         &self,
         text: &str,
-        _source_lang: Option<&str>,
+        source_lang: Option<&str>,
         target_lang: &str,
     ) -> Result<String, String> {
         if text.trim().is_empty() {
             return Ok(String::new());
         }
         let name = target_lang_name(target_lang);
+        let src_name = source_lang.map(source_lang_name).unwrap_or_default(); // 串流恆 Some(ISO)
         let body = serde_json::json!({
             "model": "local",
             "temperature": 0.1,
             "max_tokens": 256,
             "stream": false,
-            "messages": build_translate_messages(text, &name),
+            "messages": build_translate_messages(text, &src_name, &name),
         });
         let resp = self
             .http
@@ -61,7 +62,11 @@ impl Translator for LocalLlmTranslator {
             .await
             .map_err(|e| e.to_string())?;
         let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
-        Ok(postprocess_translation(&parse_chat_content(&json)?))
+        let out = postprocess_translation(&parse_chat_content(&json)?);
+        if is_untranslated(text, &out, target_lang) {
+            return Ok(String::new()); // 仍 echo → 回空 → stream.rs Ok(_) 不設 target_text → 只顯原文
+        }
+        Ok(out)
     }
 }
 
