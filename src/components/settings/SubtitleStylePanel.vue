@@ -49,7 +49,7 @@ const secondaryCss = computed(() => subTextStyle(settings.state.appearance.secon
     </div>
     <div class="field">
       <div class="lab">垂直位置（距底部）</div>
-      <input type="range" min="0" max="40" v-model.number="style.bottomPct" />
+      <input type="range" min="0" max="100" v-model.number="style.bottomPct" />
       <span class="val">{{ style.bottomPct }}%</span>
     </div>
     <div class="field">

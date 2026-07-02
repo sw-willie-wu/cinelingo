@@ -1,9 +1,11 @@
 import { LANGS } from './langs'
 export type { SourceLang } from './langs'
 export type ModelKey = 'small' | 'medium' | 'turbo' | 'large-v3'
+export type TranslateModelKey = 'translate-4b' | 'translate-12b'
 export type OutlineLevel = 'none' | 'thin' | 'mid' | 'thick'
 export type SubBackground = 'none' | 'translucent'
 export type VideoOutput = 'gpu' | 'gpu-next'
+export type PersistedSource = { kind: 'system' } | { kind: 'process'; name: string } | { kind: 'inputDevice'; id: string }
 
 export interface SubStyle {
   fontSize: number   // 1080p 參考高度下的 px 基準
@@ -16,11 +18,11 @@ export interface ImageAdjust { brightness: number; contrast: number; saturation:
 export interface EqState { enabled: boolean; preset: string; bands: number[] } // bands 長度 10
 export interface Settings {
   version: number
-  liveSubs: { enabled: boolean; model: ModelKey; sourceLang: string; saveSrt: boolean; overwriteOnParamChange: boolean; vad: { threshold: number; minSilenceMs: number }; display: { lines: number } }
+  liveSubs: { enabled: boolean; model: ModelKey; sourceLang: string; saveSrt: boolean; overwriteOnParamChange: boolean; vad: { threshold: number; minSilenceMs: number }; display: { lines: number }; audioSource: PersistedSource | null; translateEnabled: boolean; translateTo: string; translateModel: TranslateModelKey }
   hardware: { accelEnabled: boolean | null }
   appearance: { maxWidthPct: number; primary: SubStyle; secondary: SubStyle }
   ui: { language: string }
-  capture: { enabled: boolean }
+  capture: { enabled: boolean; recordAudio: boolean }
   youtube: { quality: 'auto' | number }
   playback: { videoOutput: VideoOutput }
   floating: { x: number | null; y: number | null; width: number | null }
@@ -30,6 +32,7 @@ export interface Settings {
 
 export const SETTINGS_VERSION = 1
 const MODELS: ModelKey[] = ['small', 'medium', 'turbo', 'large-v3']
+const TRANSLATE_MODELS: TranslateModelKey[] = ['translate-4b', 'translate-12b']
 const LANG_VALUES = LANGS.map((l) => l.value)
 const OUTLINES: OutlineLevel[] = ['none', 'thin', 'mid', 'thick']
 const BGS: SubBackground[] = ['none', 'translucent']
@@ -39,7 +42,7 @@ const VIDEO_OUTPUTS: VideoOutput[] = ['gpu', 'gpu-next']
 export function defaultSettings(): Settings {
   return {
     version: SETTINGS_VERSION,
-    liveSubs: { enabled: false, model: 'turbo', sourceLang: 'auto', saveSrt: true, overwriteOnParamChange: false, vad: { threshold: 0.5, minSilenceMs: 100 }, display: { lines: 3 } },
+    liveSubs: { enabled: false, model: 'turbo', sourceLang: 'auto', saveSrt: true, overwriteOnParamChange: false, vad: { threshold: 0.5, minSilenceMs: 100 }, display: { lines: 3 }, audioSource: null, translateEnabled: false, translateTo: 'zh-Hant', translateModel: 'translate-4b' },
     hardware: { accelEnabled: null },
     appearance: {
       maxWidthPct: 80,
@@ -47,7 +50,7 @@ export function defaultSettings(): Settings {
       secondary: { fontSize: 18, bottomPct: 18, color: '#ffe14d', outline: 'thin', background: 'translucent' },
     },
     ui: { language: 'zh-TW' },
-    capture: { enabled: false },
+    capture: { enabled: false, recordAudio: false },
     youtube: { quality: 'auto' },
     playback: { videoOutput: 'gpu' },
     floating: { x: null, y: null, width: null },
@@ -64,6 +67,20 @@ const clamp = (v: number, lo: number, hi: number): number => (v < lo ? lo : v > 
 const str = (v: unknown, def: string): string => (typeof v === 'string' ? v : def)
 const bool = (v: unknown, def: boolean): boolean => (typeof v === 'boolean' ? v : def)
 const obj = (v: unknown): Record<string, unknown> => (v && typeof v === 'object' ? (v as Record<string, unknown>) : {})
+const persistedSource = (v: unknown): PersistedSource | null => {
+  const o = obj(v)
+  const kind = str(o.kind, '')
+  if (kind === 'system') return { kind: 'system' }
+  if (kind === 'process') {
+    const name = str(o.name, '')
+    if (name) return { kind: 'process', name }
+  }
+  if (kind === 'inputDevice') {
+    const id = str(o.id, '')
+    if (id) return { kind: 'inputDevice', id }
+  }
+  return null
+}
 
 function mergeStyle(raw: unknown, def: SubStyle): SubStyle {
   const r = obj(raw)
@@ -105,6 +122,14 @@ export function mergeSettings(raw: unknown): Settings {
           lines: clamp(Math.round(num(dp.lines, d.liveSubs.display.lines)), 2, 5),
         }
       })(),
+      audioSource: persistedSource(ls.audioSource),
+      translateEnabled: bool(ls.translateEnabled, d.liveSubs.translateEnabled),
+      // 目標語言須為明確語言（排除 'auto'）；非法 → 預設 zh-Hant
+      translateTo: (() => {
+        const v = str(ls.translateTo, d.liveSubs.translateTo)
+        return v !== 'auto' && LANG_VALUES.includes(v) ? v : d.liveSubs.translateTo
+      })(),
+      translateModel: pick(ls.translateModel, TRANSLATE_MODELS, d.liveSubs.translateModel),
     },
     hardware: { accelEnabled: typeof hw.accelEnabled === 'boolean' ? hw.accelEnabled : null },
     appearance: {
@@ -113,7 +138,7 @@ export function mergeSettings(raw: unknown): Settings {
       secondary: mergeStyle(ap.secondary, d.appearance.secondary),
     },
     ui: { language: str(ui.language, d.ui.language) },
-    capture: { enabled: bool(cap.enabled, d.capture.enabled) },
+    capture: { enabled: bool(cap.enabled, d.capture.enabled), recordAudio: bool(cap.recordAudio, d.capture.recordAudio) },
     youtube: { quality: pick(yt.quality, YT_QUALITIES, d.youtube.quality) },
     playback: { videoOutput: pick(obj(o.playback).videoOutput, VIDEO_OUTPUTS, d.playback.videoOutput) },
     floating: (() => {

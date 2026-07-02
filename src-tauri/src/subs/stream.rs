@@ -3,6 +3,8 @@
 use super::cue::{derive_cue_id, Cue};
 use super::{hallucination, session, whisper, ProgressEvent, SessionResetEvent};
 use crate::capture::loopback;
+use crate::subs::silero::{boundary_threshold_sec, vad_threshold_to_prob, VadGate};
+use crate::subs::translate::Translator;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
@@ -62,8 +64,28 @@ pub fn collapse_repetition(text: &str) -> String {
 pub const NO_SPEECH_COMMIT: f64 = 0.45;     // commit gate（§3.3）
 pub const AGREEMENT_THRESH: u32 = 5;        // T2 末段(collapsed)不變輪數
 pub const FORCE_COMMIT_SEC: f64 = 30.0;     // T4 安全 cap
-pub const FINALIZE_SILENCE_SEC: f64 = 0.7;  // T3 句末靜音門檻（遲滯、獨立於短 gate）
 // SILENCE_KEEP_SEC / MIN_SPEECH_BUFFER_SEC 沿用既有
+
+// 回灌近期已定稿文字當 prompt（對齊 WhisperLive condition_on_previous_text）：上限字元數。
+// whisper prompt ~224 token 上限，CJK 約 1+ token/字 → 取保守值，超過從前端 trim。
+pub const RECENT_CONTEXT_CHARS: usize = 140;
+
+/// 取字串尾端最多 max_chars 個字元（按 char 切、CJK 安全，不會壞字）。純函式。
+pub fn tail_chars(s: &str, max_chars: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max_chars { return s.to_string(); }
+    chars[chars.len() - max_chars..].iter().collect()
+}
+
+/// 組 whisper prompt：靜態 steering（繁/簡）+ 近期已定稿文字（條件化解碼）。純函式。
+pub fn build_prompt(steering: &str, recent: &str) -> String {
+    match (steering.is_empty(), recent.is_empty()) {
+        (true, true) => String::new(),
+        (false, true) => steering.to_string(),
+        (true, false) => recent.to_string(),
+        (false, false) => format!("{steering} {recent}"),
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct WordTs { pub word: String, pub start_sec: f64, pub end_sec: f64 }
@@ -118,6 +140,7 @@ fn commit_seg(seg: &StreamSeg, base_offset: f64, session_id: &str, lang: &str,
             session_id: session_id.to_string(),
             start_sec: abs_start, end_sec: abs_end,
             source_text: t, lang: Some(lang.to_string()), status: "final".into(),
+            ..Default::default()
         });
     }
     if abs_end > *new_offset { *new_offset = abs_end; }
@@ -125,7 +148,8 @@ fn commit_seg(seg: &StreamSeg, base_offset: f64, session_id: &str, lang: &str,
 
 fn empty_interim(session_id: &str) -> Cue {
     Cue { id: format!("{session_id}:interim"), session_id: session_id.to_string(),
-          start_sec: 0.0, end_sec: 0.0, source_text: String::new(), lang: None, status: "interim".into() }
+          start_sec: 0.0, end_sec: 0.0, source_text: String::new(), lang: None, status: "interim".into(),
+          ..Default::default() }
 }
 
 /// 串流定稿決策（四觸發；純函式）。spec §2.3。
@@ -179,6 +203,7 @@ pub fn step(inp: StepInput) -> StepOutcome {
                     start_sec: abs_start, end_sec: abs_end,
                     source_text: last_collapsed.clone(),
                     lang: Some(inp.lang.to_string()), status: "interim".into(),
+                    ..Default::default()
                 });
                 new_held = Some(HeldInterim { text: last_collapsed, start_sec: abs_start, end_sec: abs_end });
             }
@@ -203,47 +228,57 @@ pub fn vad_threshold_to_rms(threshold: f64) -> f32 {
     (threshold * 0.02) as f32
 }
 
-/// 斷句靜音門檻 (ms) → 靜音收句窗(秒)。下限 0.05 為 footgun guard（0 → tail n=0 → 永不轉寫）。純函式。
-pub fn min_silence_to_window(ms: i64) -> f64 {
-    (ms as f64 / 1000.0).max(0.05)
-}
-
-pub struct LoopbackParams {
-    pub device_id: Option<String>,
-    pub model: String,
-    pub source_lang: String, // §4.7 必為 concrete ISO（前端保證）
-    pub prompt: String,          // 靜態繁/簡 steering（§3.1；langToWhisper 的 p，空字串=無）
-    pub vad_threshold: f64,    // 靈敏度滑桿 → RMS 門檻（映射）
-    pub vad_min_silence_ms: i64, // 斷句靜音滑桿 → 靜音收句窗（映射，含 footgun 下限）
-}
-
-/// 啟動 loopback 串流 session：互斥（走 Manager.task）、起擷取執行緒、spawn 迴圈。
+/// 啟動串流 session（arm）：互斥（走 Manager.task）、起擷取執行緒、spawn run_loop（drain-only 初始）。
+/// 由 arm_audio_source 傳入 AudioSource。
 pub async fn start(
     app: AppHandle,
     mgr: Arc<tokio::sync::Mutex<session::Manager>>,
-    params: LoopbackParams,
+    source: crate::capture::source::AudioSource,
     downloading: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    record_name: Option<String>,
 ) -> Result<(), String> {
-    let data = crate::data_dir(&app)?.join("subs");
-    let (stop, thread, rx) = loopback::start_capture(params.device_id.clone())?;
+    let dd = crate::data_dir(&app)?;
+    let data = dd.join("subs");
+    // 錄製：算輸出路徑 + cue 累積（WAV 由 capture 執行緒在源取樣率寫，見 loopback；
+    // recordings/<safe-name>.wav，sanitize 去路徑分隔避免逃逸）。建目錄。
+    let rec = record_name.map(|n| {
+        let wav_path = dd.join("recordings").join(n.replace(['/', '\\'], "_"));
+        if let Some(p) = wav_path.parent() { let _ = std::fs::create_dir_all(p); }
+        let srt_path = wav_path.with_extension("srt");
+        let cues = Arc::new(std::sync::Mutex::new(Vec::<Cue>::new()));
+        (wav_path, srt_path, cues)
+    });
+    let rec_path = rec.as_ref().map(|(w, _, _)| w.clone());
+    let rec_cues = rec.as_ref().map(|(_, _, c)| c.clone());
+    let (stop, thread, rx) = loopback::start_capture(source, rec_path)?;
     let app2 = app.clone();
     let mgr2 = mgr.clone();
-    {
+    let saved_prev = {
         let mut m = mgr.lock().await;
-        m.stop_task_pub(); // abort 任何進行中 session（含停舊 capture thread）→ 互斥
+        m.stop_task_pub();            // abort 任何進行中 session（含停舊 capture thread）→ 互斥
+        let saved = m.finalize_record(); // 收尾上一段錄音（換來源/重 arm）
         m.bump_counter();
         let session_id = m.session_id_str();
         m.reset_cancel();
         m.set_data_dir(data.clone());
         m.set_capture(stop.clone(), thread);
+        if let Some((wav_path, srt_path, cues)) = rec {
+            m.set_record(session::RecordState { cues, wav_path, srt_path });
+        }
         let cancel = m.cancel_arc();
+        let transcribe = m.transcribe_flag();
+        let params_h = m.params_handle();
         app.emit("sub-session-reset", SessionResetEvent { session_id: session_id.clone(), no_clock: true }).ok();
         let handle = tauri::async_runtime::spawn(async move {
-            if let Err(e) = run_loop(app2.clone(), mgr2, session_id, params, data, downloading, cancel, rx, stop).await {
+            if let Err(e) = run_loop(app2.clone(), mgr2, session_id, transcribe, params_h, data, downloading, cancel, rx, stop, rec_cues).await {
                 app2.emit("sub-progress", ProgressEvent { phase: "error".into(), done: 0, total: None, message: e }).ok();
             }
         });
         m.set_task(handle);
+        saved
+    };
+    if let Some(p) = saved_prev {
+        app.emit("recording-saved", p.to_string_lossy().to_string()).ok();
     }
     Ok(())
 }
@@ -255,21 +290,20 @@ async fn run_loop(
     app: AppHandle,
     mgr: Arc<tokio::sync::Mutex<session::Manager>>,
     session_id: String,
-    params: LoopbackParams,
+    transcribe: Arc<AtomicBool>,
+    params_h: Arc<std::sync::Mutex<Option<session::TranscribeParams>>>,
     data: std::path::PathBuf,
     downloading: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     cancel: Arc<AtomicBool>,
     rx: std::sync::mpsc::Receiver<Vec<f32>>,
     _stop: Arc<AtomicBool>,
+    record_cues: Option<Arc<std::sync::Mutex<Vec<Cue>>>>,  // 錄製時收定稿 cue → 停止寫 SRT
 ) -> Result<(), String> {
+    // 串流 server 維持 --vad OFF：內建 --vad 在 silero 判 0-speech 的窗會崩潰退出（實測一開即中），
+    // 重啟＝60s 模型重載、不可行。要對齊 WhisperLive vad_filter 須走 client-side silero 預過濾（另做）。
     let vad = session::VadParams { threshold: 0.5, min_silence_ms: 100, vad_enabled: false };
-    let mut port = session::ensure_server(&app, &mgr, &data, &cancel, &params.model, &vad, &downloading).await?;
-    let http = { mgr.lock().await.http_clone().ok_or("no http")? };
-    let lang = params.source_lang;
-    let prompt = params.prompt.clone();                 // 靜態 steering（§3.1；見 LoopbackParams 改動）
-    let rms_thresh = vad_threshold_to_rms(params.vad_threshold);
-    let silence_window = min_silence_to_window(params.vad_min_silence_ms);
     let rate = loopback::TARGET_RATE as f64;
+    const MAX_DRAIN_SEC: f64 = 2.0;
 
     let mut frames: Vec<f32> = Vec::new();
     let mut offset_sec: f64 = 0.0;
@@ -278,21 +312,142 @@ async fn run_loop(
     let mut last_interim_text = String::new();
     let mut agreement_count: u32 = 0;
     let mut held: Option<HeldInterim> = None;
+    let mut recent_text = String::new(); // 滾動近期已定稿文字（prompt 上下文，per-session 起空）
+    let mut server_ready = false;
+    let mut vad_gate: Option<VadGate> = None;
+    const MAX_INFLIGHT_TRANSLATIONS: usize = 3;
+    let xlate_sem = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_INFLIGHT_TRANSLATIONS));
+    let mut warmed_translate_key: Option<String> = None;
+    let mut port = 0u16;
+    let mut active: Option<(String /*lang*/, String /*prompt*/, String /*model*/)> = None;
+    let mut last_level = std::time::Instant::now();
     app.emit("sub-progress", ProgressEvent { phase: "decode".into(), done: 0, total: None, message: "擷取中".into() }).ok();
 
     while !cancel.load(Ordering::SeqCst) {
         let mut got = 0usize;
         while let Ok(chunk) = rx.try_recv() { got += chunk.len(); frames.extend(chunk); }
         captured_sec += got as f64 / rate;
-        let buffer_len = frames.len() as f64 / rate;
 
-        let tail_speech = buffer_len >= MIN_SPEECH_BUFFER_SEC
-            && loopback::tail_has_speech(&frames, silence_window, rms_thresh);
+        // 聲源視覺化：每 ~80ms emit 近窗 RMS（drain 與轉寫期間都送，成本極低）
+        if last_level.elapsed() >= std::time::Duration::from_millis(80) {
+            let n = (rate * 0.1) as usize; // 近 100ms 窗
+            let tail = if frames.len() > n { &frames[frames.len() - n..] } else { &frames[..] };
+            let rms = loopback::rms(tail);
+            app.emit("capture-level", rms).ok();
+            last_level = std::time::Instant::now();
+        }
+
+        if !transcribe.load(Ordering::SeqCst) {
+            // CC 關 → drain-only 模式：重置 server 狀態、bounded drain（最多保留 MAX_DRAIN_SEC）
+            server_ready = false;
+            active = None;
+            let keep = (MAX_DRAIN_SEC * rate) as usize;
+            if frames.len() > keep {
+                frames.drain(0..frames.len() - keep);
+                offset_sec = captured_sec - MAX_DRAIN_SEC;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(CADENCE_MS)).await;
+            continue;
+        }
+
+        // UI 改「即時字幕語言」(來源語言/prompt) 或模型 → active 與 params 不符 → 重置 server 狀態，
+        // 讓下方 !server_ready 區塊用新來源語言重新初始化（清 buffer/VAD）；否則 whisper 續用舊語言
+        // （active 只在 server 就緒時擷取一次、CC 關才清，故切來源語言原本不生效）。
+        if server_ready {
+            let stale = {
+                let l = params_h.lock().unwrap();
+                match (l.as_ref(), active.as_ref()) {
+                    (Some(p), Some((al, ap, am))) => &p.source_lang != al || &p.prompt != ap || &p.model != am,
+                    _ => false,
+                }
+            };
+            if stale { server_ready = false; }
+        }
+
+        // CC 開：確保 server 就緒（lazy，首次或 CC 重開時才載模型）
+        if !server_ready {
+            let p_opt = { params_h.lock().unwrap().clone() }; // guard dropped before any await
+            let p = match p_opt {
+                Some(p) => p,
+                None => {
+                    tokio::time::sleep(std::time::Duration::from_millis(CADENCE_MS)).await;
+                    continue;
+                }
+            };
+            port = session::ensure_server(&app, &mgr, &data, &cancel, &p.model, &vad, &downloading).await?;
+            active = Some((p.source_lang.clone(), p.prompt.clone(), p.model.clone()));
+            server_ready = true;
+            // reset offset/buffer 邊界，避免把 drain-only 期間的舊音當待轉
+            offset_sec = captured_sec;
+            frames.clear();
+            recent_text.clear();
+            // VAD：CC 重開重置——清 NN 狀態 + last_speech_sec 對齊 captured_sec
+            // （否則長 CC-off 後 trailing_silence 巨大 → 首句立刻假觸發 silence_boundary）。
+            // 初始門檻用預設；實際門檻每輪由 set_thresholds 依 UI 靈敏度更新（見下）。
+            last_speech_sec = captured_sec;
+            match vad_gate.as_mut() {
+                Some(g) => g.reset(),
+                None => match VadGate::new(0.5, 0.35, 2) {
+                    Ok(g) => vad_gate = Some(g),
+                    Err(e) => eprintln!("[stream] VadGate 建立失敗（loopback 斷句退回 RMS、字幕仍走）：{e}"),
+                },
+            }
+        }
+
+        // 每-tick：翻譯模型 key 改變（或首次）→ 重新暖機（換模型會殺舊 sidecar、載新 GGUF）。
+        // 讀 params_h live（同 :397 模式）；target_lang None（翻譯關）不暖機。
+        let (want_xlate, cur_key) = {
+            let l = params_h.lock().unwrap();
+            (
+                l.as_ref().map(|p| !p.target_langs.is_empty()).unwrap_or(false),
+                l.as_ref().map(|p| p.translate_model.clone()),
+            )
+        };
+        if want_xlate {
+            if let Some(k) = cur_key {
+                if Some(&k) != warmed_translate_key.as_ref() {
+                    warmed_translate_key = Some(k.clone()); // 樂觀：避免每 tick 重 spawn
+                    let (a2, m2, d2, dl2) = (app.clone(), mgr.clone(), data.clone(), downloading.clone());
+                    tokio::spawn(async move {
+                        if let Err(e) = session::ensure_translator(&a2, &m2, &d2, &dl2, &k).await {
+                            eprintln!("[stream] translator 暖機/換模型失敗（字幕仍走、暫不翻）：{e}");
+                        }
+                    });
+                }
+            }
+        }
+
+        let http = { mgr.lock().await.http_clone().ok_or("no http")? };
+        let (lang, prompt, model) = active.as_ref().unwrap().clone();
+        // 每輪讀 UI VAD 參數（即時生效）：靈敏度→gate 門檻、靜音時長→句界門檻。
+        let (sp_live, msil_live) = {
+            let lock = params_h.lock().unwrap();
+            match lock.as_ref() {
+                Some(p) => (vad_threshold_to_prob(p.vad_threshold), p.vad_min_silence_ms),
+                None => (vad_threshold_to_prob(0.5), 100),
+            }
+        };
+        if let Some(g) = vad_gate.as_mut() {
+            g.set_thresholds(sp_live, (sp_live - 0.15_f32).max(0.05_f32)); // neg 恆 < sp
+        }
+        // VAD 驅動斷句（取代 RMS）：餵本輪新樣本給 gate，得本輪是否含語音框。
+        let speech_in_tick = match vad_gate.as_mut() {
+            Some(g) => {
+                let start = frames.len().saturating_sub(got);
+                g.push(&frames[start..])
+            }
+            None => loopback::tail_has_speech(&frames, 0.1, vad_threshold_to_rms(0.5)), // 退路：gate 沒建成
+        };
+        let buffer_len = frames.len() as f64 / rate;
+        let tail_speech = buffer_len >= MIN_SPEECH_BUFFER_SEC && speech_in_tick;
         if tail_speech { last_speech_sec = captured_sec; }
         let trailing_silence = captured_sec - last_speech_sec;
-        let silence_boundary = trailing_silence >= FINALIZE_SILENCE_SEC && held.is_some();
+        let boundary_sec = boundary_threshold_sec(msil_live);
+        let silence_boundary = trailing_silence >= boundary_sec && held.is_some();
 
-        let pr = if prompt.is_empty() { None } else { Some(prompt.as_str()) };
+        // 靜態 steering + 近期已定稿文字 → 條件化解碼（同音字/專有名詞一致性）。
+        let combined_prompt = build_prompt(&prompt, &recent_text);
+        let pr = if combined_prompt.is_empty() { None } else { Some(combined_prompt.as_str()) };
 
         if tail_speech || silence_boundary {
             // 路徑 A / 路徑 B：轉寫 + step
@@ -301,7 +456,7 @@ async fn run_loop(
                 Err(e) => {
                     eprintln!("[stream] transcribe 失敗（server 可能崩潰），重啟續跑：{e}");
                     mgr.lock().await.invalidate_server();
-                    port = session::ensure_server(&app, &mgr, &data, &cancel, &params.model, &vad, &downloading).await?;
+                    port = session::ensure_server(&app, &mgr, &data, &cancel, &model, &vad, &downloading).await?;
                     continue;
                 }
             };
@@ -311,7 +466,37 @@ async fn run_loop(
                 last_interim_text: &last_interim_text, agreement_count,
                 held_interim: held.clone(), session_id: &session_id, lang: &lang,
             });
-            for f in &o.finals { app.emit("sub-cue", f).ok(); }
+            let targets: Vec<String> = { params_h.lock().unwrap().as_ref().map(|p| p.target_langs.clone()).unwrap_or_default() };
+            let translator = if !targets.is_empty() { mgr.lock().await.translator_clone() } else { None };
+            for f in &o.finals {
+                app.emit("sub-cue", f).ok();
+                recent_text.push_str(&f.source_text); // 累積已定稿（已過 collapse，不會灌重複牆）
+                if let Some(tr) = translator.clone() {
+                    if let Ok(permit) = xlate_sem.clone().try_acquire_owned() {  // 滿了就跳過（只留原文）
+                        let app2 = app.clone();
+                        let mut cue = f.clone();
+                        let src_lang = f.lang.clone();
+                        let tgts = targets.clone();
+                        tokio::spawn(async move {
+                            let _permit = permit; // 持有到全部目標翻完
+                            for tgt in &tgts {
+                                match tr.translate(&cue.source_text, src_lang.as_deref(), tgt).await {
+                                    Ok(t) if !t.is_empty() => { cue.translations.insert(tgt.clone(), t); }
+                                    Ok(_) => {}
+                                    Err(e) => eprintln!("[stream] translate 失敗（保留原文）：{e}"),
+                                }
+                            }
+                            if !cue.translations.is_empty() {
+                                app2.emit("sub-cue", &cue).ok(); // 同 id → 前端 upsertCue 就地覆蓋
+                            }
+                        });
+                    }
+                }
+            }
+            if let Some(cues) = &record_cues {           // 錄製：定稿 cue 收進 SRT buffer（停止時寫檔）
+                cues.lock().unwrap_or_else(|e| e.into_inner()).extend(o.finals.iter().cloned());
+            }
+            recent_text = tail_chars(&recent_text, RECENT_CONTEXT_CHARS);
             if let Some(it) = &o.interim { app.emit("sub-cue", it).ok(); }
             if o.trim_to_sample > 0 { frames.drain(0..o.trim_to_sample); }
             offset_sec = o.new_offset_sec;
@@ -324,7 +509,7 @@ async fn run_loop(
             let drop = samples_to_drop(offset_sec, target, rate, frames.len());
             if drop > 0 { frames.drain(0..drop); offset_sec = target; }
         }
-        // else：line_active 但 trailing_silence < FINALIZE_SILENCE_SEC → 純等待（不轉寫、不 trim，避免微停頓誤切）
+        // else：line_active 但 trailing_silence < boundary_sec（vad_min_silence_ms）→ 純等待（不轉寫、不 trim，避免微停頓誤切）
 
         tokio::time::sleep(std::time::Duration::from_millis(CADENCE_MS)).await;
     }
@@ -340,14 +525,6 @@ mod tests {
         assert!((vad_threshold_to_rms(0.5) - 0.01).abs() < 1e-6);
         assert!((vad_threshold_to_rms(1.0) - 0.02).abs() < 1e-6);
         assert_eq!(vad_threshold_to_rms(0.0), 0.0);
-    }
-
-    #[test]
-    fn min_silence_maps_with_floor() {
-        assert!((min_silence_to_window(100) - 0.1).abs() < 1e-9);
-        assert!((min_silence_to_window(700) - 0.7).abs() < 1e-9);
-        assert!((min_silence_to_window(0) - 0.05).abs() < 1e-9);   // footgun guard
-        assert!((min_silence_to_window(30) - 0.05).abs() < 1e-9);  // < floor → floor
     }
 
     #[test]
@@ -463,6 +640,23 @@ mod tests {
         let o2 = step(base_input(&segs2, true, false, 0.0, 2.0, "", 0));
         assert!(o2.finals.is_empty());
         assert_eq!(o2.new_offset_sec, 1.0);
+    }
+
+    // ── 回灌 prompt 上下文 ────────────────────────────────────────────────────
+    #[test]
+    fn tail_chars_keeps_last_n_cjk_safe() {
+        assert_eq!(tail_chars("一二三四五", 3), "三四五");
+        assert_eq!(tail_chars("一二三", 5), "一二三"); // 短於上限原樣
+        assert_eq!(tail_chars("", 3), "");
+        assert_eq!(tail_chars("abcde", 2), "de");
+    }
+
+    #[test]
+    fn build_prompt_combines_steering_and_recent() {
+        assert_eq!(build_prompt("", ""), "");
+        assert_eq!(build_prompt("以下是繁體", ""), "以下是繁體");
+        assert_eq!(build_prompt("", "前文內容"), "前文內容");
+        assert_eq!(build_prompt("以下是繁體", "前文內容"), "以下是繁體 前文內容");
     }
 
     // ── Task 1: collapse_repetition ──────────────────────────────────────────

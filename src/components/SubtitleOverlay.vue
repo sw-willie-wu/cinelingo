@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { computed, ref, onMounted, onBeforeUnmount } from 'vue'
+import { computed, ref, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useSubtitles, type TrackName } from '../player/useSubtitles'
 import { usePlayer } from '../player/usePlayer'
 import { useSettings } from '../player/useSettings'
 import { subTextStyle, scaleFontPx } from '../player/settings'
-import { liveLines, displayCharCap } from '../player/subtitles'
+import { liveLines, displayCharCap, type Cue } from '../player/subtitles'
 
 const subs = useSubtitles()
 const player = usePlayer()
@@ -23,7 +23,12 @@ function line(track: TrackName, styleKey: 'primary' | 'secondary') {
     transcribing: computed(() => subs.isTranscribing(track, t.value)),
     textStyle: computed(() => subTextStyle(style.value, winH.value)),
     dimStyle: computed(() => ({ ...subTextStyle(style.value, winH.value), fontSize: `${scaleFontPx(style.value.fontSize * 0.7, winH.value)}px` })),
-    overlayStyle: computed(() => ({ bottom: `${style.value.bottomPct}%` })),
+    // bottomPct 0→底部、100→頂部，線性映射到完整視窗高度且全程在畫面內
+    // （top:P% 放錨點、translateY(-P%) 依元件自身高度回拉，避免高 bottomPct 時被推出上緣）。
+    overlayStyle: computed(() => {
+      const fromTop = 100 - style.value.bottomPct
+      return { top: `${fromTop}%`, transform: `translateY(-${fromTop}%)` }
+    }),
   }
 }
 const p = line('primary', 'primary')
@@ -40,23 +45,58 @@ const liveCap = computed(() =>
 const clockMaxWidthStyle = computed(() => ({
   maxWidth: `${Math.round(winW.value * settings.state.appearance.maxWidthPct / 100)}px`,
 }))
-const live = computed((): { lines: string[]; interimLines: string[] } =>
-  subs.noClock.value
-    ? liveLines(subs.liveCues.value, subs.liveInterim.value, settings.state.liveSubs.display.lines, liveCap.value)
-    : { lines: [] as string[], interimLines: [] as string[] }
+function fieldPick(track: 'primary' | 'secondary'): (c: Cue) => string {
+  const to = subs.tracks[track].translateTo
+  return to === 'off' ? (c) => c.sourceText : (c) => c.translations?.[to] ?? c.sourceText
+}
+const primaryLive = computed((): { lines: string[]; interimLines: string[] } =>
+  subs.noClock.value && subs.tracks.primary.source === 'live'
+    ? liveLines(subs.liveCues.value, subs.liveInterim.value, settings.state.liveSubs.display.lines, liveCap.value, fieldPick('primary'))
+    : { lines: [], interimLines: [] }
 )
+const secondaryLive = computed((): { lines: string[]; interimLines: string[] } =>
+  subs.noClock.value && subs.tracks.secondary.source === 'live'
+    ? liveLines(subs.liveCues.value, subs.liveInterim.value, settings.state.liveSubs.display.lines, liveCap.value, fieldPick('secondary'))
+    : { lines: [], interimLines: [] }
+)
+// 依該軌實際文字語言標 lang（譯文→目標語言、原文→來源語言），讓簡/繁走各自字型。interim 恆原文。
+const srcLang = computed(() => settings.state.liveSubs.sourceLang)
+function fieldLang(track: 'primary' | 'secondary'): string {
+  const to = subs.tracks[track].translateTo
+  return to !== 'off' ? to : srcLang.value
+}
+
+// 閒置偵測（僅 loopback）：超過 IDLE_MS 沒新字幕 → 清掉最後字幕（與浮動字幕一致；句間空檔不殘留）。
+const IDLE_MS = 4000
+const now = ref(Date.now())
+let lastActivity = Date.now()
+let idleTimer: ReturnType<typeof setInterval> | undefined
+onMounted(() => { idleTimer = setInterval(() => { now.value = Date.now() }, 1000) })
+onBeforeUnmount(() => { if (idleTimer) clearInterval(idleTimer) })
+watch([primaryLive, secondaryLive], () => { lastActivity = Date.now() })   // loopback 內容變動＝活動
+const idle = computed(() => now.value - lastActivity > IDLE_MS)
 </script>
 
 <template>
-  <!-- no-clock (loopback)：多行 last-N final + interim（較淡） -->
+  <!-- no-clock (loopback)：主/次軌各自獨立定位（各吃自己的 Y 位置，與時鐘模式一致） -->
   <div
-    v-if="subs.noClock.value && (live.lines.length || live.interimLines.length)"
+    v-if="subs.noClock.value && (primaryLive.lines.length || primaryLive.interimLines.length) && !idle"
     class="sub-overlay"
     :style="p.overlayStyle.value"
   >
     <span class="sub-text" :style="p.textStyle.value"
-      ><span v-if="live.lines.length">{{ live.lines.join('\n') }}</span
-      ><span v-if="live.interimLines.length" class="interim">{{ (live.lines.length ? '\n' : '') + live.interimLines.join('\n') }}</span></span
+      ><span v-if="primaryLive.lines.length" :lang="fieldLang('primary')">{{ primaryLive.lines.join('\n') }}</span
+      ><span v-if="primaryLive.interimLines.length" class="interim" :lang="srcLang">{{ (primaryLive.lines.length ? '\n' : '') + primaryLive.interimLines.join('\n') }}</span></span
+    >
+  </div>
+  <div
+    v-if="subs.noClock.value && (secondaryLive.lines.length || secondaryLive.interimLines.length) && !idle"
+    class="sub-overlay"
+    :style="s.overlayStyle.value"
+  >
+    <span class="sub-text" :style="s.textStyle.value"
+      ><span v-if="secondaryLive.lines.length" :lang="fieldLang('secondary')">{{ secondaryLive.lines.join('\n') }}</span
+      ><span v-if="secondaryLive.interimLines.length" class="interim" :lang="srcLang">{{ (secondaryLive.lines.length ? '\n' : '') + secondaryLive.interimLines.join('\n') }}</span></span
     >
   </div>
 

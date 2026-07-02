@@ -1,7 +1,7 @@
 /** 軌道與檔案記憶的純函式（與後端 cache::normalize / Part C 快取鍵規則等價）。 */
 
 export interface SubFile { id: string; path: string | null }
-export interface StoredTrack { source: string; delaySec: number }
+export interface StoredTrack { source: string; delaySec: number; translateTo: string }
 export interface StoredEntry { manualFiles: string[]; primary: StoredTrack; secondary: StoredTrack }
 
 /** 正規化路徑作 KV key：小寫 + 統一分隔符。Windows 大小寫不敏感 → 同片同鍵；與 Rust normalize 等價。 */
@@ -12,7 +12,7 @@ export function normKey(path: string): string {
 /** runtime track（source 可能是 fileId）→ 可儲存格式：fileId → 該檔絕對 path；'off'/'live' 原樣。 */
 export function trackToStored(track: StoredTrack, files: SubFile[]): StoredTrack {
   const f = files.find((x) => x.id === track.source)
-  return { source: f?.path ?? track.source, delaySec: track.delaySec }
+  return { source: f?.path ?? track.source, delaySec: track.delaySec, translateTo: track.translateTo }
 }
 
 /** 儲存的 source → runtime source：'off'→off；'live'→master 開才 live 否則 off；path→對應 fileId 否則 off。 */
@@ -29,9 +29,10 @@ function coerceTrack(t: unknown): StoredTrack {
     return {
       source: typeof obj.source === 'string' ? obj.source : 'off',
       delaySec: typeof obj.delaySec === 'number' ? obj.delaySec : 0,
+      translateTo: typeof obj.translateTo === 'string' ? obj.translateTo : 'off',
     }
   }
-  return { source: 'off', delaySec: 0 }
+  return { source: 'off', delaySec: 0, translateTo: 'off' }
 }
 
 export function coerceStoredEntry(raw: unknown): StoredEntry {

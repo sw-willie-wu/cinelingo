@@ -18,13 +18,34 @@ const current = computed(() => props.options.find((o) => o.value === props.model
 function place() {
   const r = btn.value?.getBoundingClientRect()
   if (!r) return
-  menuStyle.value = { top: `${r.bottom + 4}px`, left: `${r.left}px`, width: `${r.width}px` }
+  const gap = 4, margin = 8 // 選單與按鈕間距 / 離視窗邊緣留白
+  const spaceBelow = window.innerHeight - r.bottom - gap - margin
+  const spaceAbove = r.top - gap - margin
+  // 下方夠(≥220)就往下；否則若上方較寬就往上長。兩向都限高 + 滾動，避免被視窗邊緣截掉。
+  const down = spaceBelow >= 220 || spaceBelow >= spaceAbove
+  // 收短：最多 ~8 列高，且不超過該方向可用空間（清單再長就內部捲動）。
+  const maxH = Math.max(140, Math.min(288, Math.floor(down ? spaceBelow : spaceAbove)))
+  // 寬度：至少和按鈕一樣寬，可長到內容寬（避免長選項被截 → 橫向捲軸）；上限不超出視窗右緣。
+  const style: Record<string, string> = {
+    left: `${r.left}px`,
+    minWidth: `${r.width}px`,
+    maxWidth: `${Math.max(r.width, window.innerWidth - r.left - margin)}px`,
+    maxHeight: `${maxH}px`,
+  }
+  if (down) style.top = `${r.bottom + gap}px`
+  else style.bottom = `${window.innerHeight - r.top + gap}px`
+  menuStyle.value = style
+}
+function onScroll(e: Event) {
+  // 選單內部捲動不關閉；只有底層頁面捲動(按鈕會位移)才關。
+  if (menuEl.value && e.target instanceof Node && menuEl.value.contains(e.target)) return
+  close()
 }
 function close() {
   if (!open.value) return
   open.value = false
   document.removeEventListener('click', onDocClick, true)
-  window.removeEventListener('scroll', close, true)
+  window.removeEventListener('scroll', onScroll, true)
   window.removeEventListener('resize', close)
 }
 function toggle() {
@@ -33,7 +54,7 @@ function toggle() {
   open.value = true
   place()
   document.addEventListener('click', onDocClick, true)
-  window.addEventListener('scroll', close, true)
+  window.addEventListener('scroll', onScroll, true)
   window.addEventListener('resize', close)
 }
 function onDocClick(e: MouseEvent) {
@@ -48,12 +69,12 @@ onBeforeUnmount(close)
 <template>
   <div class="gsel">
     <button ref="btn" type="button" class="gsel-btn" :disabled="disabled" @click.stop="toggle">
-      <span>{{ current }}</span>
+      <span :lang="modelValue">{{ current }}</span>
       <svg class="gsel-chev" :class="{ up: open }" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6" /></svg>
     </button>
     <Teleport to="body">
       <div v-if="open" ref="menuEl" class="gsel-menu" :style="menuStyle">
-        <button v-for="o in options" :key="o.value" type="button" class="gsel-opt" :class="{ on: o.value === modelValue }" @click="select(o.value)">{{ o.label }}</button>
+        <button v-for="o in options" :key="o.value" type="button" class="gsel-opt" :class="{ on: o.value === modelValue }" :lang="o.value" @click="select(o.value)">{{ o.label }}</button>
       </div>
     </Teleport>
   </div>
@@ -72,6 +93,7 @@ onBeforeUnmount(close)
 .gsel-chev.up { transform: rotate(180deg); }
 .gsel-menu {
   position: fixed; z-index: 70; box-sizing: border-box; padding: 4px; display: flex; flex-direction: column; gap: 1px;
+  overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain;
   background: rgba(26,26,30,0.72); backdrop-filter: blur(28px) saturate(1.4); -webkit-backdrop-filter: blur(28px) saturate(1.4);
   border: 1px solid rgba(255,255,255,0.12); border-radius: 9px; box-shadow: 0 14px 34px rgba(0,0,0,0.55);
 }

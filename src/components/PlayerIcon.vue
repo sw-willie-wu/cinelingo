@@ -16,6 +16,10 @@ export type IconName =
   | 'close' | 'back' | 'grid' | 'minimize' | 'maximize' | 'restore'
   | 'floating-subs'
   | 'adjust'
+  | 'more'
+  | 'mic'
+  | 'speed' | 'quality' | 'image' | 'normalize' | 'audiodelay'
+  | 'home' | 'stop' | 'ban' | 'file' | 'translate' | 'plus'
 
 withDefaults(defineProps<{ name: IconName; size?: number }>(), { size: 20 })
 </script>
@@ -172,5 +176,94 @@ withDefaults(defineProps<{ name: IconName; size?: number }>(), { size: 20 })
     <circle cx="15" cy="12" r="2.2" fill="currentColor" stroke="none" />
     <line x1="4" y1="17" x2="20" y2="17" />
     <circle cx="10" cy="17" r="2.2" fill="currentColor" stroke="none" />
+  </svg>
+
+  <!-- more（水平三點：更多 / 設定） -->
+  <svg v-else-if="name === 'more'" :width="size" :height="size" viewBox="0 0 24 24" fill="currentColor">
+    <circle cx="5" cy="12" r="1.9" />
+    <circle cx="12" cy="12" r="1.9" />
+    <circle cx="19" cy="12" r="1.9" />
+  </svg>
+
+  <!-- mic（麥克風） -->
+  <svg v-else-if="name === 'mic'" :width="size" :height="size" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="9" y="2" width="6" height="11" rx="3"/>
+    <path d="M19 10a7 7 0 0 1-14 0"/>
+    <line x1="12" y1="19" x2="12" y2="23"/>
+    <line x1="8" y1="23" x2="16" y2="23"/>
+  </svg>
+
+  <!-- speed（速度錶：播放速度） -->
+  <svg v-else-if="name === 'speed'" :width="size" :height="size" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M4.5 18a8 8 0 1 1 15 0" />
+    <path d="M12 13.5 15.5 10" />
+    <circle cx="12" cy="13.5" r="1.1" fill="currentColor" stroke="none" />
+  </svg>
+
+  <!-- quality（顯示器：畫質） -->
+  <svg v-else-if="name === 'quality'" :width="size" :height="size" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="3" y="4.5" width="18" height="12" rx="2" />
+    <line x1="9" y1="20" x2="15" y2="20" />
+    <line x1="12" y1="16.5" x2="12" y2="20" />
+  </svg>
+
+  <!-- image（對比半圓：影像調整） -->
+  <svg v-else-if="name === 'image'" :width="size" :height="size" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="12" cy="12" r="9" />
+    <path d="M12 3a9 9 0 0 0 0 18Z" fill="currentColor" stroke="none" />
+  </svg>
+
+  <!-- normalize（音量條：音量正規化） -->
+  <svg v-else-if="name === 'normalize'" :width="size" :height="size" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <line x1="5" y1="9" x2="5" y2="15" />
+    <line x1="10" y1="4.5" x2="10" y2="19.5" />
+    <line x1="15" y1="7" x2="15" y2="17" />
+    <line x1="20" y1="10.5" x2="20" y2="13.5" />
+  </svg>
+
+  <!-- stop（圓角方塊：停止播放） -->
+  <svg v-else-if="name === 'stop'" :width="size" :height="size" viewBox="0 0 24 24" fill="currentColor">
+    <rect x="6" y="6" width="12" height="12" rx="2.5" />
+  </svg>
+
+  <!-- home（房子：關閉影片回首頁） -->
+  <svg v-else-if="name === 'home'" :width="size" :height="size" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M2.5 11 12 3.5 21.5 11" />
+    <path d="M4.5 10V20h15V10" />
+    <path d="M9.5 20v-5.5h5V20" />
+  </svg>
+
+  <!-- audiodelay（時鐘：音訊延遲） -->
+  <svg v-else-if="name === 'audiodelay'" :width="size" :height="size" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="12" cy="12" r="9" />
+    <path d="M12 7v5l3.5 2" />
+  </svg>
+
+  <!-- ban（禁止圓斜線：關閉 / 不使用） -->
+  <svg v-else-if="name === 'ban'" :width="size" :height="size" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="12" cy="12" r="9" />
+    <path d="M5.64 5.64 18.36 18.36" />
+  </svg>
+
+  <!-- file（字幕檔：file-text） -->
+  <svg v-else-if="name === 'file'" :width="size" :height="size" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" />
+    <path d="M14 3v5h5" />
+    <path d="M9 13h6M9 16.5h4" />
+  </svg>
+
+  <!-- translate（語言/翻譯：languages） -->
+  <svg v-else-if="name === 'translate'" :width="size" :height="size" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <path d="m5 8 6 6" />
+    <path d="m4 14 6-6 2-3" />
+    <path d="M2 5h12" />
+    <path d="M7 2h1" />
+    <path d="m22 22-5-10-5 10" />
+    <path d="M14 18h6" />
+  </svg>
+
+  <!-- plus（新增） -->
+  <svg v-else-if="name === 'plus'" :width="size" :height="size" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M12 5v14M5 12h14" />
   </svg>
 </template>

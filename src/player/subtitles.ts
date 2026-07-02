@@ -6,8 +6,7 @@ export interface Cue {
   sourceText: string
   lang: string | null
   status: 'final' | 'interim'
-  targetText?: string
-  targetLang?: string
+  translations?: Record<string, string>
 }
 
 /** 決定性鍵：來源段絕對起始毫秒（同段重轉得同 id → upsertCue 可取代）。 */
@@ -31,6 +30,11 @@ export function upsertCues(list: Cue[], incoming: Cue[]): Cue[] {
   next.push(...incoming)
   next.sort((a, b) => a.startSec - b.startSec)
   return next
+}
+
+/** 依該軌 translateTo 挑顯示文字：off → 原文；有譯文 → 譯文；缺譯文 → fallback 原文。純函式。 */
+export function pickCueText(cue: Cue, translateTo: string): string {
+  return (translateTo !== 'off' ? cue.translations?.[translateTo] : undefined) ?? cue.sourceText
 }
 
 /** 時間落在 [start,end) 的第一條（純時間，不看 sessionId；每個來源各自獨立 cue 陣列）。 */
@@ -130,17 +134,18 @@ export function liveLines(
   interim: Cue | null,
   n: number,
   cap: number = MAX_PHRASE_CHARS,
+  pick: (c: Cue) => string = (c) => c.sourceText,
 ): { lines: string[]; interimLines: string[] } {
   const scan = finals.slice(-DISPLAY_FINALS_SCAN)
   const phrases: string[] = []
-  for (const c of scan) for (const p of splitFinalLines(c.sourceText)) phrases.push(p)
+  for (const c of scan) for (const p of splitFinalLines(pick(c))) phrases.push(p)
   const dedup: string[] = []
   for (const p of phrases) if (dedup[dedup.length - 1] !== p) dedup.push(p)
   const allInterim = interim && interim.sourceText.trim() !== '' ? splitDisplayPhrases(interim.sourceText, cap) : []
   // interim 優先：先放 interim（置底、最多 n 行），剩餘額度給最新的 final 行。
   const interimLines = n > 0 ? allInterim.slice(-n) : []
   const remaining = n - interimLines.length
-  const lines = remaining > 0 ? dedup.slice(-remaining) : [] // 注意：slice(-0)===slice(0) 會回全部，故需 remaining>0 守衛
+  const lines = remaining > 0 ? dedup.slice(-remaining) : []
   return { lines, interimLines }
 }
 
@@ -195,7 +200,39 @@ export function parseVtt(text: string): Cue[] {
   return out
 }
 
+/** 把 read_cued_translations 的 start-ms 鍵譯文併進 cue 陣列（file 軌：cue id 為索引，故用時間等值配對）。純函式。 */
+export function mergeCachedTranslations(cues: Cue[], cached: { id: string; translations: Record<string, string> }[]): Cue[] {
+  if (cached.length === 0) return cues
+  const byMs = new Map(cached.map((x) => [Number(x.id), x.translations]))
+  return cues.map((c) => {
+    const tr = byMs.get(Math.round(c.startSec * 1000))
+    return tr ? { ...c, translations: { ...(c.translations ?? {}), ...tr } } : c
+  })
+}
+
 /** 依副檔名路由至正確解析器（.vtt → parseVtt；其餘 → parseSrt）。 */
 export function parseSubtitle(name: string, text: string): Cue[] {
   return name.toLowerCase().endsWith('.vtt') ? parseVtt(text) : parseSrt(text)
+}
+
+/** 取 playhead 前方 lookahead 窗內、缺 translations[target] 的 cue（含涵蓋 playhead 的當前 cue）。純函式。 */
+export function selectUpcomingUntranslated(
+  cues: Cue[], playheadSec: number, lookaheadSec: number, target: string,
+): Cue[] {
+  const end = playheadSec + lookaheadSec
+  return cues.filter((c) => c.endSec >= playheadSec && c.startSec <= end && !c.translations?.[target])
+}
+
+/** 由兩軌的 translateTo 推導後端要翻的目標語言集合（去重、排除 'off'、只計 live 軌）。master 關 → 空集合（不翻）。 */
+export function distinctTargets(
+  primary: { source: string; translateTo: string },
+  secondary: { source: string; translateTo: string },
+  enabled: boolean,
+): string[] {
+  if (!enabled) return []
+  const out: string[] = []
+  for (const t of [primary, secondary]) {
+    if (t.source === 'live' && t.translateTo !== 'off' && !out.includes(t.translateTo)) out.push(t.translateTo)
+  }
+  return out
 }

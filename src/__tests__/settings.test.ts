@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, test } from 'vitest'
 import { defaultSettings, mergeSettings, SETTINGS_VERSION } from '../player/settings'
 import { outlineToTextShadow, scaleFontPx, subTextStyle } from '../player/settings'
 
@@ -79,10 +79,11 @@ describe('settings defaults + merge', () => {
       .toEqual({ threshold: 0.5, minSilenceMs: 100 })
   })
   it('capture defaults + merge', () => {
-    expect(defaultSettings().capture).toEqual({ enabled: false })
-    expect(mergeSettings({}).capture).toEqual({ enabled: false })
+    expect(defaultSettings().capture).toEqual({ enabled: false, recordAudio: false })
+    expect(mergeSettings({}).capture).toEqual({ enabled: false, recordAudio: false })
     expect(mergeSettings({ capture: { enabled: true } }).capture.enabled).toBe(true)
     expect(mergeSettings({ capture: { enabled: 'x' } } as any).capture.enabled).toBe(false)
+    expect(mergeSettings({ capture: { recordAudio: true } } as any).capture.recordAudio).toBe(true)
   })
   it('maxWidthPct: default 80, lives on appearance', () => {
     expect(defaultSettings().appearance.maxWidthPct).toBe(80)
@@ -140,6 +141,27 @@ describe('settings defaults + merge', () => {
     expect(m.video.saturation).toBe(0)
     expect(m.audio.eq.bands.length).toBe(10)
   })
+  it('audioSource defaults null on legacy', () => {
+    const merged = mergeSettings({ liveSubs: { model: 'turbo' } } as any)
+    expect(merged.liveSubs.audioSource).toBeNull()
+  })
+  it('defaults translate off, target zh-Hant', () => {
+    const s = mergeSettings({})
+    expect(s.liveSubs.translateEnabled).toBe(false)
+    expect(s.liveSubs.translateTo).toBe('zh-Hant')
+  })
+  it('keeps valid translateTo, rejects invalid and auto', () => {
+    expect(mergeSettings({ liveSubs: { translateTo: 'ja' } }).liveSubs.translateTo).toBe('ja')
+    expect(mergeSettings({ liveSubs: { translateTo: 'zzz' } }).liveSubs.translateTo).toBe('zh-Hant')
+    expect(mergeSettings({ liveSubs: { translateTo: 'auto' } }).liveSubs.translateTo).toBe('zh-Hant')
+  })
+})
+
+test('translateModel defaults to translate-4b and validates', () => {
+  expect(defaultSettings().liveSubs.translateModel).toBe('translate-4b')
+  expect(mergeSettings({}).liveSubs.translateModel).toBe('translate-4b')
+  expect(mergeSettings({ liveSubs: { translateModel: 'translate-12b' } }).liveSubs.translateModel).toBe('translate-12b')
+  expect(mergeSettings({ liveSubs: { translateModel: 'bogus' } }).liveSubs.translateModel).toBe('translate-4b')
 })
 
 describe('playback.videoOutput', () => {

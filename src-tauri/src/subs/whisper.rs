@@ -7,6 +7,9 @@ use std::path::Path;
 use std::process::Stdio;
 use tokio::process::{Child, Command};
 
+/// beam search 寬度（對齊 WhisperLive faster-whisper 預設 beam_size=5）。
+pub const BEAM_SIZE: u32 = 5;
+
 pub fn free_port() -> Result<u16, String> {
     let l = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
     Ok(l.local_addr().map_err(|e| e.to_string())?.port())
@@ -29,6 +32,9 @@ pub fn build_server_args(model: &Path, vad_model: &Path, vad: &VadParams, port: 
     }
     args.extend([
         OsString::from("--suppress-nst"),
+        // beam search（對齊 WhisperLive 的 beam_size=5）——whisper-server 預設 -bs -1 ＝貪婪 best-of-2，
+        // 準度遜於 beam-5。3080+turbo 仍可即時。
+        OsString::from("-bs"), OsString::from(BEAM_SIZE.to_string()),
         OsString::from("--host"), OsString::from("127.0.0.1"),
         OsString::from("--port"), OsString::from(port.to_string()),
     ]);
@@ -226,6 +232,12 @@ mod tests {
     fn build_server_args_includes_suppress_nst() {
         // 布林裸旗：單一 token，不接值
         assert!(has(&sample_args(), "--suppress-nst"));
+    }
+
+    #[test]
+    fn build_server_args_enables_beam_search() {
+        // 對齊 WhisperLive：beam_size=5（非 server 預設貪婪 -1）
+        assert!(has_pair(&sample_args(), "-bs", "5"), "缺/錯 -bs <beam_size>");
     }
 
     #[test]

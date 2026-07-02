@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest'
-import { rowState, nextAutoSelect } from './modelRows'
+import { describe, it, expect, test } from 'vitest'
+import { rowState, nextAutoSelect, nextAutoSelectTranslate } from './modelRows'
 
 describe('rowState', () => {
   const S = (...xs: string[]) => new Set(xs)
@@ -31,4 +31,11 @@ describe('nextAutoSelect', () => {
   it('未轉寫、原選取未下載 → 選剛下載的那顆', () => {
     expect(nextAutoSelect('turbo', S('small'), 'small', false)).toBe('small')
   })
+})
+
+test('translate auto-select picks just-downloaded when current absent', () => {
+  const dl = new Set<string>(['translate-4b'])
+  expect(nextAutoSelectTranslate('translate-12b', dl, 'translate-4b')).toBe('translate-4b')
+  dl.add('translate-12b')
+  expect(nextAutoSelectTranslate('translate-12b', dl, 'translate-12b')).toBe(null) // current present → no change
 })

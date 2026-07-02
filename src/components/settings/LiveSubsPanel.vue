@@ -52,15 +52,17 @@ function resetVad() {
   settings.state.liveSubs.vad.threshold = 0.5
   settings.state.liveSubs.vad.minSilenceMs = 100
 }
+
+
 </script>
 
 <template>
   <div>
     <div class="p-title">即時字幕</div>
-    <div class="p-sub">AI 即時聽寫字幕（Whisper）。設定使用的模型、轉寫語言與自動儲存。</div>
+    <div class="p-sub">AI 即時聽寫字幕。設定使用的模型、轉寫語言與自動儲存。</div>
 
     <div class="field">
-      <div class="lab">啟用即時字幕<small>開啟後會自動下載尚未安裝的引擎（ffmpeg、語音偵測 VAD、轉譯模組(whisper)）</small></div>
+      <div class="lab">啟用即時字幕<small>開啟後會自動下載尚未安裝的引擎（ffmpeg、語音偵測 VAD、轉譯模組）</small></div>
       <GlassToggle :model-value="settings.state.liveSubs.enabled" @update:model-value="onMaster" />
     </div>
 

@@ -3,6 +3,7 @@ import { ref } from 'vue'
 import { useSettings } from '../player/useSettings'
 import SettingsIcon from './settings/SettingsIcon.vue'
 import LiveSubsPanel from './settings/LiveSubsPanel.vue'
+import TranslatePanel from './settings/TranslatePanel.vue'
 import HardwarePanel from './settings/HardwarePanel.vue'
 import SubtitleStylePanel from './settings/SubtitleStylePanel.vue'
 import CapturePanel from './settings/CapturePanel.vue'
@@ -21,6 +22,7 @@ const GENERAL = [
 ]
 const ADVANCED = [
   { key: 'liveSubs', label: '即時字幕', icon: 'captions' },
+  { key: 'translate', label: '字幕翻譯', icon: 'translate' },
   { key: 'capture', label: '擷取與錄製', icon: 'video' },
   { key: 'network', label: '網路', icon: 'globe' },
 ]
@@ -51,6 +53,7 @@ const PH = {
         </nav>
         <div class="sm-content">
           <LiveSubsPanel v-if="current === 'liveSubs'" />
+          <TranslatePanel v-else-if="current === 'translate'" />
           <HardwarePanel v-else-if="current === 'hardware'" />
           <SubtitleStylePanel v-else-if="current === 'appearance'" />
           <CapturePanel v-else-if="current === 'capture'" />

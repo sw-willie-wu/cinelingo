@@ -1,10 +1,10 @@
 import { reactive } from 'vue'
 import { listen } from '@tauri-apps/api/event'
-import { listModels, downloadModel } from './backend'
+import { listModels, downloadModel, listTranslateModels } from './backend'
 import { useSettings } from './useSettings'
 import { useSubtitles } from './useSubtitles'
-import { nextAutoSelect } from './modelRows'
-import type { ModelKey } from './settings'
+import { nextAutoSelect, nextAutoSelectTranslate } from './modelRows'
+import type { ModelKey, TranslateModelKey } from './settings'
 
 interface ModelDownloadEvent {
   key: string
@@ -13,6 +13,10 @@ interface ModelDownloadEvent {
   total: number | null
   message: string | null
 }
+
+// 真實 whisper 模型 key（自動選模只對這些有效；LLM 引擎下載的 key 不算）。
+const WHISPER_MODEL_KEYS = new Set<string>(['small', 'medium', 'turbo', 'large-v3'])
+const TRANSLATE_MODEL_KEYS = new Set<string>(['translate-4b', 'translate-12b'])
 
 // 模組層單例（跨設定 Modal 開/關存活；背景下載中關掉再開仍見進度）。
 const downloaded = reactive(new Set<string>())
@@ -29,6 +33,9 @@ function ensureWired(): Promise<void> {
       } catch {
         /* 視為皆未下載 */
       }
+      try {
+        for (const m of await listTranslateModels()) if (m.downloaded) downloaded.add(m.key)
+      } catch { /* ignore */ }
       await listen<ModelDownloadEvent>('model-download', (e) => {
         const { key, phase, done, total } = e.payload
         if (phase === 'downloading') {
@@ -38,14 +45,28 @@ function ensureWired(): Promise<void> {
           downloading.delete(key)
           downloaded.add(key)
           errored.delete(key)
-          const settings = useSettings()
-          const pick = nextAutoSelect(
-            settings.state.liveSubs.model,
-            downloaded,
-            key as ModelKey,
-            useSubtitles().enabled.value,
-          )
-          if (pick) settings.state.liveSubs.model = pick
+          // 只對「真實 whisper 模型 key」做自動選模；其他 key（翻譯模型 'translate-4b'/
+          // 'translate-12b' 見下方分支，共用引擎 'llm-server'）也會走 model-download 'done'，
+          // 但 `key as ModelKey` 對它們是不安全轉型，不可拿去寫 liveSubs.model。
+          if (WHISPER_MODEL_KEYS.has(key)) {
+            const settings = useSettings()
+            const pick = nextAutoSelect(
+              settings.state.liveSubs.model,
+              downloaded,
+              key as ModelKey,
+              useSubtitles().enabled.value,
+            )
+            if (pick) settings.state.liveSubs.model = pick
+          }
+          if (TRANSLATE_MODEL_KEYS.has(key)) {
+            const settings = useSettings()
+            const pick = nextAutoSelectTranslate(
+              settings.state.liveSubs.translateModel,
+              downloaded,
+              key as TranslateModelKey,
+            )
+            if (pick) settings.state.liveSubs.translateModel = pick
+          }
         } else {
           downloading.delete(key)
           errored.add(key)

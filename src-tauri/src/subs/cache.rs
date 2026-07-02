@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use super::cue::{derive_cue_id, Cue};
 use super::plan;
@@ -89,9 +90,79 @@ pub fn parse_srt_cached(text: &str) -> Vec<Cue> {
             source_text: body,
             lang: None,
             status: "final".into(),
+            ..Default::default()
         });
     }
     out
+}
+
+/// 翻譯 sidecar 的來源身分（決定快取路徑）。前端以 tagged enum 傳入（camelCase 欄位）。
+/// ⚠️ enum 層 `rename_all` 只改 variant 名（Live→live），**不改 struct-variant 欄位名**——
+/// 故每個 variant 須各自標 `rename_all="camelCase"`，否則前端 `videoPath`/`srcLang`/`subPath`
+/// 反序列化失敗（missing field `video_path`），且被 scheduler `.catch` 吞掉、無單元測試可抓。
+#[derive(serde::Deserialize, Clone, Debug)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum XlateSource {
+    /// 影片轉寫軌：與來源 SRT 同 hash 目錄；src_lang = cacheKeyLang（檔名前綴）。
+    #[serde(rename_all = "camelCase")]
+    Live { video_path: String, src_lang: String },
+    /// 載入的字幕檔軌：以字幕檔路徑 hash 為目錄（一檔一來源語言）。
+    #[serde(rename_all = "camelCase")]
+    File { sub_path: String },
+}
+
+/// 一條譯文的時間軸 + 文字（start-ms 為身分鍵，由 map key 承載）。
+#[derive(Clone, Debug, PartialEq)]
+pub struct XlateRec {
+    pub start_sec: f64,
+    pub end_sec: f64,
+    pub text: String,
+}
+
+/// per-target 譯文 sidecar 路徑。Live 與來源 SRT co-located（同 hash 目錄）。
+pub fn translation_sidecar_path(app_data_dir: &Path, source: &XlateSource, target: &str) -> PathBuf {
+    let base = app_data_dir.join("whisper-subs");
+    match source {
+        XlateSource::Live { video_path, src_lang } => base
+            .join(hash_path(video_path))
+            .join(format!("{src_lang}.{target}.whisper.srt")),
+        XlateSource::File { sub_path } => base
+            .join(hash_path(sub_path))
+            .join(format!("{target}.srt")),
+    }
+}
+
+/// 讀 sidecar → start-ms 鍵的譯文 map。缺檔/解析失敗 → 空。複用 parse_srt_cached（body=譯文）。
+pub fn read_translation_srt(path: &Path) -> BTreeMap<i64, XlateRec> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(_) => return BTreeMap::new(),
+    };
+    parse_srt_cached(&text)
+        .into_iter()
+        .map(|c| {
+            let ms = (c.start_sec * 1000.0).round() as i64;
+            (ms, XlateRec { start_sec: c.start_sec, end_sec: c.end_sec, text: c.source_text })
+        })
+        .collect()
+}
+
+/// 整份 map → sidecar SRT（body=譯文）。建目錄。複用 cues_to_srt（借 Cue.source_text 承載譯文）。
+pub fn write_translation_srt(path: &Path, recs: &BTreeMap<i64, XlateRec>) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let cues: Vec<Cue> = recs
+        .values()
+        .map(|r| Cue {
+            start_sec: r.start_sec,
+            end_sec: r.end_sec,
+            source_text: r.text.clone(),
+            status: "final".into(),
+            ..Default::default()
+        })
+        .collect();
+    std::fs::write(path, cues_to_srt(&cues))
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Default, Clone)]
@@ -209,9 +280,9 @@ mod tests {
     fn cues_to_srt_formats_sorted() {
         let cues = vec![
             Cue { id: "x".into(), session_id: "".into(), start_sec: 60.0, end_sec: 61.5,
-                  source_text: "second".into(), lang: None, status: "final".into() },
+                  source_text: "second".into(), lang: None, status: "final".into(), ..Default::default() },
             Cue { id: "y".into(), session_id: "".into(), start_sec: 1.0, end_sec: 2.0,
-                  source_text: "first".into(), lang: None, status: "final".into() },
+                  source_text: "first".into(), lang: None, status: "final".into(), ..Default::default() },
         ];
         let srt = cues_to_srt(&cues);
         assert!(srt.starts_with("1\n00:00:01,000 --> 00:00:02,000\nfirst\n\n"));
@@ -233,9 +304,9 @@ mod tests {
     fn srt_round_trip_preserves_ids() {
         let cues = vec![
             Cue { id: derive_cue_id(10500), session_id: "s1".into(), start_sec: 10.5, end_sec: 12.0,
-                  source_text: "hi".into(), lang: Some("ja".into()), status: "final".into() },
+                  source_text: "hi".into(), lang: Some("ja".into()), status: "final".into(), ..Default::default() },
             Cue { id: derive_cue_id(60000), session_id: "s1".into(), start_sec: 60.0, end_sec: 62.0,
-                  source_text: "bye\nnow".into(), lang: None, status: "final".into() },
+                  source_text: "bye\nnow".into(), lang: None, status: "final".into(), ..Default::default() },
         ];
         let parsed = parse_srt_cached(&cues_to_srt(&cues));
         assert_eq!(parsed.len(), 2);
@@ -310,6 +381,53 @@ mod tests {
     }
 
     #[test]
+    fn xlate_sidecar_path_live_and_file() {
+        let root = Path::new("C:/data");
+        let live = translation_sidecar_path(
+            root,
+            &XlateSource::Live { video_path: "C:\\V.MKV".into(), src_lang: "ja".into() },
+            "zh-Hant",
+        );
+        assert!(live.to_string_lossy().replace('\\', "/").ends_with("ja.zh-Hant.whisper.srt"));
+        // 與來源 SRT 同 hash 目錄（大小寫/分隔符正規化）
+        assert_eq!(live.parent().unwrap(), cache_path_for(root, "c:/v.mkv", "ja").parent().unwrap());
+        let file = translation_sidecar_path(
+            root, &XlateSource::File { sub_path: "C:/subs/movie.ja.srt".into() }, "zh-Hant",
+        );
+        assert!(file.to_string_lossy().replace('\\', "/").ends_with("zh-Hant.srt"));
+    }
+
+    #[test]
+    fn xlate_srt_round_trip_and_merge_preserves_old() {
+        let dir = std::env::temp_dir().join(format!("lmpv-xlate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("zh-Hant.srt");
+        let mut m = std::collections::BTreeMap::new();
+        m.insert(1000, XlateRec { start_sec: 1.0, end_sec: 2.0, text: "你好".into() });
+        write_translation_srt(&path, &m).unwrap();
+        // 讀回：start-ms 鍵、譯文入 text
+        let back = read_translation_srt(&path);
+        assert_eq!(back.len(), 1);
+        assert_eq!(back[&1000].text, "你好");
+        assert_eq!(back[&1000].start_sec, 1.0);
+        // 缺檔 → 空 map
+        assert!(read_translation_srt(&dir.join("none.srt")).is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn xlate_source_deserializes_frontend_camelcase() {
+        // 前端 backend.ts 送 camelCase 欄位——守住 enum 層 rename_all 不改欄位名的坑。
+        let live: XlateSource = serde_json::from_str(
+            r#"{"kind":"live","videoPath":"C:/v.mkv","srcLang":"ja"}"#).unwrap();
+        match live { XlateSource::Live { video_path, src_lang } => {
+            assert_eq!(video_path, "C:/v.mkv"); assert_eq!(src_lang, "ja"); }, _ => panic!("expected Live") }
+        let file: XlateSource = serde_json::from_str(
+            r#"{"kind":"file","subPath":"C:/a.srt"}"#).unwrap();
+        match file { XlateSource::File { sub_path } => assert_eq!(sub_path, "C:/a.srt"), _ => panic!("expected File") }
+    }
+
+    #[test]
     fn write_then_read_cache_round_trip() {
         let dir = std::env::temp_dir().join(format!("lmpv-cache-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -319,6 +437,7 @@ mod tests {
         let cues = vec![Cue {
             id: derive_cue_id(1000), session_id: "s1".into(), start_sec: 1.0, end_sec: 2.0,
             source_text: "hi".into(), lang: Some("ja".into()), status: "final".into(),
+            ..Default::default()
         }];
         write_cache(
             &srt, &json, &cues, &vec![(0.0, 30.0)], "C:/v.mkv", 120.0, Some("ja"),

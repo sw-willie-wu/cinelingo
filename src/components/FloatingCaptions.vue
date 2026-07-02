@@ -6,7 +6,7 @@ import { useSettings } from '../player/useSettings'
 import { useFloatingMode } from '../player/useFloatingMode'
 import { usePlayer } from '../player/usePlayer'
 import { subTextStyle, scaleFontPx } from '../player/settings'
-import { liveLines, displayCharCap } from '../player/subtitles'
+import { liveLines, displayCharCap, type Cue } from '../player/subtitles'
 
 const subs = useSubtitles()
 const settings = useSettings()
@@ -35,11 +35,27 @@ const cap = computed(() =>
 //  - 時鐘字幕（沿用既有：字幕檔 / mode A 即時字幕）＝隨播放時間 time-pos 取當下該顯示的句子
 const isLoopback = computed(() => subs.noClock.value)
 const t = computed(() => player.state.timePos ?? 0)
-const live = computed(() =>
-  isLoopback.value
-    ? liveLines(subs.liveCues.value, subs.liveInterim.value, settings.state.liveSubs.display.lines, cap.value)
-    : { lines: [] as string[], interimLines: [] as string[] }
+function fieldPick(track: 'primary' | 'secondary'): (c: Cue) => string {
+  const to = subs.tracks[track].translateTo
+  return to === 'off' ? (c) => c.sourceText : (c) => c.translations?.[to] ?? c.sourceText
+}
+// 依該軌實際文字語言標 lang（譯文→目標語言、原文→來源語言），讓簡/繁走各自字型。interim 恆原文。
+const srcLang = computed(() => settings.state.liveSubs.sourceLang)
+function fieldLang(track: 'primary' | 'secondary'): string {
+  const to = subs.tracks[track].translateTo
+  return to !== 'off' ? to : srcLang.value
+}
+const primaryLive = computed((): { lines: string[]; interimLines: string[] } =>
+  isLoopback.value && subs.tracks.primary.source === 'live'
+    ? liveLines(subs.liveCues.value, subs.liveInterim.value, settings.state.liveSubs.display.lines, cap.value, fieldPick('primary'))
+    : { lines: [], interimLines: [] }
 )
+const secondaryLive = computed((): { lines: string[]; interimLines: string[] } =>
+  isLoopback.value && subs.tracks.secondary.source === 'live'
+    ? liveLines(subs.liveCues.value, subs.liveInterim.value, settings.state.liveSubs.display.lines, cap.value, fieldPick('secondary'))
+    : { lines: [], interimLines: [] }
+)
+const secStyle = computed(() => subTextStyle(settings.state.appearance.secondary, FONT_REF_H))
 const clockText = computed(() => (isLoopback.value ? '' : subs.activeText('primary', t.value)))
 const clockTranscribing = computed(() => !isLoopback.value && subs.isTranscribing('primary', t.value))
 
@@ -47,14 +63,17 @@ const clockTranscribing = computed(() => !isLoopback.value && subs.isTranscribin
 // 時鐘字幕模式的句間空檔屬正常，不顯示待命提示（避免安靜片段一直閃）。
 const IDLE_MS = 4000
 const hasContent = computed(() =>
-  isLoopback.value ? (live.value.lines.length > 0 || live.value.interimLines.length > 0) : !!clockText.value
+  isLoopback.value
+    ? (primaryLive.value.lines.length > 0 || primaryLive.value.interimLines.length > 0 ||
+       secondaryLive.value.lines.length > 0 || secondaryLive.value.interimLines.length > 0)
+    : !!clockText.value
 )
 const now = ref(Date.now())
 let lastActivity = Date.now()
 let idleTimer: ReturnType<typeof setInterval> | undefined
 onMounted(() => { idleTimer = setInterval(() => { now.value = Date.now() }, 1000) })
 onBeforeUnmount(() => { if (idleTimer) clearInterval(idleTimer) })
-watch(live, () => { lastActivity = Date.now() })   // loopback 內容變動＝活動
+watch([primaryLive, secondaryLive], () => { lastActivity = Date.now() })   // loopback 內容變動＝活動
 const idle = computed(() => now.value - lastActivity > IDLE_MS)
 const showCaption = computed(() => (isLoopback.value ? hasContent.value && !idle.value : hasContent.value))
 
@@ -92,11 +111,20 @@ function onResizeEast() { dragging.value = true; win.startResizeDragging('East')
       <div v-show="showOverlay" class="hover-bg"></div>
     </Transition>
     <div class="cap-area">
-      <!-- loopback（外部內容）：多行 final + interim -->
-      <span v-if="isLoopback && showCaption" class="cap-text" :style="textStyle"
-        ><span v-if="live.lines.length">{{ live.lines.join('\n') }}</span
-        ><span v-if="live.interimLines.length" class="interim">{{ (live.lines.length ? '\n' : '') + live.interimLines.join('\n') }}</span></span
-      >
+      <!-- loopback（外部內容）：每軌獨立滾動塊（主軌上、次軌下） -->
+      <span v-if="isLoopback && showCaption" class="cap-text cap-stack" :style="textStyle">
+        <span
+          v-if="primaryLive.lines.length || primaryLive.interimLines.length"
+          ><span v-if="primaryLive.lines.length" :lang="fieldLang('primary')">{{ primaryLive.lines.join('\n') }}</span
+          ><span v-if="primaryLive.interimLines.length" class="interim" :lang="srcLang">{{ (primaryLive.lines.length ? '\n' : '') + primaryLive.interimLines.join('\n') }}</span></span
+        >
+        <span
+          v-if="secondaryLive.lines.length || secondaryLive.interimLines.length"
+          :style="secStyle"
+          ><span v-if="secondaryLive.lines.length" :lang="fieldLang('secondary')">{{ secondaryLive.lines.join('\n') }}</span
+          ><span v-if="secondaryLive.interimLines.length" class="interim" :lang="srcLang">{{ (secondaryLive.lines.length ? '\n' : '') + secondaryLive.interimLines.join('\n') }}</span></span
+        >
+      </span>
       <!-- 時鐘字幕（沿用既有：字幕檔 / mode A 即時字幕）：當下該句 -->
       <span v-else-if="!isLoopback && showCaption" class="cap-text" :style="textStyle">{{ clockText }}</span>
       <!-- mode A 即時字幕還沒追上 -->
@@ -121,6 +149,7 @@ function onResizeEast() { dragging.value = true; win.startResizeDragging('East')
 .cap-text { line-height: 1.3; text-align: center; white-space: pre-wrap; }
 .cap-text .interim { opacity: 0.75; }
 .cap-text.dim { opacity: 0.55; }
+.cap-stack { display: flex; flex-direction: column; align-items: center; }
 /* 閒置提示：淡淡的小膠囊，讓使用者找得到字幕條（無字幕時才顯示）。 */
 .idle-hint {
   font-size: 13px; color: rgba(255,255,255,0.72); background: rgba(0,0,0,0.42);

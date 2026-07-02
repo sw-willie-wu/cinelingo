@@ -1,18 +1,19 @@
 import { ref, reactive, readonly, computed, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
-import { upsertCue, upsertCues, selectCueAt, parseSubtitle, FINALS_CAP, type Cue } from './subtitles'
+import { upsertCue, upsertCues, selectCueAt, parseSubtitle, FINALS_CAP, distinctTargets, pickCueText, selectUpcomingUntranslated, mergeCachedTranslations, type Cue } from './subtitles'
 import { currentAudioFfIndex } from '../mpv'
 import { usePlayer } from './usePlayer'
 import { useSettings } from './useSettings'
 import { langToWhisper } from './langs'
-import { readTextFile, listSidecarSubs, loadSubMemory, saveSubMemory, startLoopback, stopLoopback, type SidecarSub } from './backend'
+import { readTextFile, listSidecarSubs, loadSubMemory, saveSubMemory, startExternalTranscription, stopExternalTranscription, translateCues, translateEngineReady, readCuedTranslations, type XlateSource, type XlateCueOut, type SidecarSub } from './backend'
+import { useAudioSource } from './useAudioSource'
 import { normKey, trackToStored, restoreTrackSource, coerceStoredEntry, type StoredEntry } from './subMemory'
 import { clampSecondaryToPrimary as clampSec, pickCcRestore, type CcSnapshot } from './ccRestore'
 
 interface Progress { phase: string; done: number; total: number | null; message: string }
 export type TrackName = 'primary' | 'secondary'
-interface TrackSel { source: string; delaySec: number } // source: 'off' | 'live' | fileId
+interface TrackSel { source: string; delaySec: number; translateTo: string } // source: 'off' | 'live' | fileId; translateTo: 'off' | langValue
 
 // live 來源
 const liveCues = ref<Cue[]>([])
@@ -69,8 +70,8 @@ function recordCurrent(): void {
 }
 // 雙軌
 const tracks = reactive<{ primary: TrackSel; secondary: TrackSel }>({
-  primary: { source: 'off', delaySec: 0 },
-  secondary: { source: 'off', delaySec: 0 },
+  primary: { source: 'off', delaySec: 0, translateTo: 'off' },
+  secondary: { source: 'off', delaySec: 0, translateTo: 'off' },
 })
 
 const liveNeeded = computed(() => tracks.primary.source === 'live' || tracks.secondary.source === 'live')
@@ -82,6 +83,7 @@ function ensureWired(): Promise<void> {
       try { memory = (await loadSubMemory()) as Record<string, unknown> } catch { memory = {} }
       await listen<Cue>('sub-cue', (e) => {
         if (e.payload.sessionId !== sessionId.value) return
+        if (!liveNeeded.value) return  // CC 已關：拒絕後到的 cue，避免 race 黏畫面
         if (e.payload.status === 'interim') {
           liveInterim.value = e.payload.sourceText.trim() ? e.payload : null
         } else {
@@ -93,8 +95,12 @@ function ensureWired(): Promise<void> {
         }
       })
       await listen<Cue[]>('sub-cue-batch', (e) => {
+        if (!liveNeeded.value) return
         const seed = e.payload.filter((c) => c.sessionId === sessionId.value)
-        if (seed.length) liveCues.value = upsertCues(liveCues.value, seed)
+        if (seed.length) {
+          liveCues.value = upsertCues(liveCues.value, seed)
+          for (const n of ['primary', 'secondary'] as const) if (tracks[n].source === 'live') void loadCachedForTrack(n)
+        }
       })
       await listen<{ sessionId: string; noClock: boolean }>('sub-session-reset', (e) => {
         sessionId.value = e.payload.sessionId
@@ -109,15 +115,93 @@ function ensureWired(): Promise<void> {
       })
       usePlayer().onSeek((sec: number) => { if (liveNeeded.value) invoke('notify_seek', { sec }) })
       const s = useSettings().state
-      // 啟用中改 model/語言 → 重啟
+      // (a) 來源 cue 會變 → 恆重轉（clock 與 loopback 皆是）
       watch(() => [s.liveSubs.model, s.liveSubs.sourceLang] as const, () => {
         if (liveNeeded.value) startForCurrent().catch(() => {})
       })
-      // 任一軌進/離 live → 起/停轉寫
+      // (b) 翻譯相關重轉：只 loopback 需要（後端 inline 翻）。computed 無條件（不依賴 noClock，
+      //     避免 arm 時 noClock false→true 觸發多餘重啟）；由 callback 的 noClock 閘控實際只在 loopback 重轉。
+      //     clock 模式：computed 變動使 watch 觸發但 callback no-op（noClock false）→ 不重轉，交排程器補翻。
+      const xlateRestart = computed(() =>
+        [s.liveSubs.translateModel, ...distinctTargets(tracks.primary, tracks.secondary, s.liveSubs.translateEnabled)])
+      watch(xlateRestart, () => {
+        if (liveNeeded.value && noClock.value) startForCurrent().catch(() => {})
+      })
+      // 任一軌進/離 live → 起/停轉寫（startForCurrent 依 armed 狀態分派外部/影片路徑）
       watch(liveNeeded, (need) => {
         if (need) startForCurrent().catch(() => {})
-        else { startGen++; invoke('stop_transcription').catch(() => {}); liveCues.value = [] }
+        else {
+          startGen++
+          // armed 模式：stop_external_transcription 僅 set_transcribe(false)，保留 capture loop；
+          // 非 armed（影片）：stop_transcription = shutdown()，殺整個 session。
+          if (useAudioSource().armed.value) {
+            stopExternalTranscription().catch(() => {})
+            // noClock 不重置：arm 時 sub-session-reset 已設 noClock=true；start_external_transcription
+            // 不重發 reset，若此處清掉 false，重開 CC 後字幕走時間模式永遠顯示不出。
+          } else {
+            invoke('stop_transcription').catch(() => {})
+            noClock.value = false
+          }
+          liveCues.value = []
+          liveInterim.value = null
+        }
       })
+      const audioSrc = useAudioSource()
+      // armed 解除 → live 軌關閉（觸發 stop）；armed 啟用 + liveNeeded 已開 → 主動重啟（避免先開 CC 再 arm 時無字幕）
+      watch(audioSrc.armed, (armed) => {
+        if (!armed) {
+          if (tracks.primary.source === 'live') tracks.primary.source = 'off'
+          if (tracks.secondary.source === 'live') tracks.secondary.source = 'off'
+        } else if (liveNeeded.value) {
+          startForCurrent().catch(() => {})
+        }
+      })
+      // 外部音源切換（已在轉寫中）→ 以新音源重啟
+      watch(audioSrc.current, (newSrc, oldSrc) => {
+        if (newSrc !== null && oldSrc !== null && liveNeeded.value) {
+          startForCurrent().catch(() => {})
+        }
+      })
+      // ── clock 模式惰性翻譯排程器（Spec B）──
+      const inFlight = new Set<string>()          // key: `${source}:${cueId}:${target}`
+      const engineReadyRef = ref(false)
+      // 引擎就緒狀態：master 開時查一次後端（server+model）；translateModel/enabled 變時重查。
+      watch(() => [s.liveSubs.translateEnabled, s.liveSubs.translateModel] as const, async ([en, mdl]) => {
+        engineReadyRef.value = en ? await translateEngineReady(mdl).catch(() => false) : false
+      }, { immediate: true })
+
+      const LOOKAHEAD_SEC = 10
+      let schedTimer: ReturnType<typeof setTimeout> | null = null
+      function scheduleTranslate(): void {
+        if (schedTimer) return
+        schedTimer = setTimeout(() => { schedTimer = null; void runScheduler() }, 200)
+      }
+      async function runScheduler(): Promise<void> {
+        const player = usePlayer()
+        const srcCur = player.source.current
+        const t = player.state.timePos ?? 0
+        for (const name of ['primary', 'secondary'] as const) {
+          const track = tracks[name]
+          if (!shouldTranslateTrack(track, noClock.value, !!srcCur, engineReadyRef.value)) continue
+          const cues = resolveCues(track)
+          const upcoming = selectUpcomingUntranslated(cues, t - track.delaySec, LOOKAHEAD_SEC, track.translateTo)
+            .filter((c) => !inFlight.has(`${track.source}:${c.id}:${track.translateTo}`))
+          if (upcoming.length === 0) continue
+          const xlSrc = buildXlateSource(track.source, srcCur, s.liveSubs.sourceLang)
+          if (!xlSrc) continue
+          const target = track.translateTo
+          upcoming.forEach((c) => inFlight.add(`${track.source}:${c.id}:${target}`))
+          const payload = upcoming.map((c) => ({ id: c.id, sourceText: c.sourceText, sourceLang: c.lang, startSec: c.startSec, endSec: c.endSec }))
+          translateCues(xlSrc, payload, [target], s.liveSubs.translateModel, s.liveSubs.saveSrt)
+            .then((outs) => patchTranslations(track.source, outs))
+            .catch(() => {})
+            .finally(() => upcoming.forEach((c) => inFlight.delete(`${track.source}:${c.id}:${target}`)))
+        }
+      }
+      // 播放頭 / 軌 / 就緒 變動 → 排程（debounce 內部）
+      watch(() => [usePlayer().state.timePos, tracks.primary.translateTo, tracks.secondary.translateTo,
+                   tracks.primary.source, tracks.secondary.source, noClock.value, engineReadyRef.value] as const,
+            () => scheduleTranslate())
     })()
   }
   return wirePromise
@@ -134,6 +218,7 @@ async function resolveFfIndex(): Promise<number | null> {
 }
 
 // 呼叫當下自種 model + lang + prompt（取代舊 enable() 的 seeding）。
+// armed + 無影片 → 外部轉寫；否則走影片路徑。
 async function startForCurrent(): Promise<void> {
   const gen = ++startGen
   const player = usePlayer()
@@ -152,6 +237,25 @@ async function startForCurrent(): Promise<void> {
     cacheKeyLang: s.liveSubs.sourceLang,
     vadThreshold: s.liveSubs.vad.threshold,
     vadMinSilenceMs: s.liveSubs.vad.minSilenceMs,
+  }
+  // 外部音源模式：armed 且無影片（有影片時優先走影片路徑）
+  if (useAudioSource().armed.value && !src) {
+    if (!lang.value) {
+      player.notify('請先在設定→即時字幕將來源語言設為明確語言')
+      tracks.primary.source = 'off'  // 還原，避免 CC 顯示開但無轉寫
+      return
+    }
+    if (gen !== startGen) return
+    await startExternalTranscription(
+      model.value,
+      lang.value,
+      promptText.value ?? '',
+      s.liveSubs.vad.threshold,
+      s.liveSubs.vad.minSilenceMs,
+      distinctTargets(tracks.primary, tracks.secondary, s.liveSubs.translateEnabled),
+      s.liveSubs.translateModel,
+    )
+    return
   }
   if (src?.kind === 'remote') {
     // 遠端(YT)：優先從 audio-only 軌抽音訊（不限速）；無則退 muxed playback_url（後端 decode_remote_audio）。跳過 resolveFfIndex；
@@ -184,6 +288,52 @@ function resolveCues(sel: TrackSel): Cue[] {
   return files.value.find((f) => f.id === sel.source)?.cues ?? []
 }
 
+/** 由軌 source 建後端 XlateSource：'live'→Live(影片路徑+cacheKeyLang)；file→File(字幕檔路徑)。無效回 null。 */
+function buildXlateSource(source: string, srcCur: { id: string } | null, cacheKeyLang: string): XlateSource | null {
+  if (source === 'live') return srcCur ? { kind: 'live', videoPath: srcCur.id, srcLang: cacheKeyLang } : null
+  const f = files.value.find((x) => x.id === source)
+  return f?.path ? { kind: 'file', subPath: f.path } : null
+}
+/** 把 translate_cues 回傳 patch 進容器：live→liveCues upsert；file→就地補 translations（先 ??= {}）。 */
+function patchTranslations(source: string, outs: XlateCueOut[]): void {
+  if (outs.length === 0) return
+  if (source === 'live') {
+    for (const o of outs) {
+      if (Object.keys(o.translations).length === 0) continue
+      const idx = liveCues.value.findIndex((c) => c.id === o.id)
+      if (idx >= 0) liveCues.value = upsertCue(liveCues.value, { ...liveCues.value[idx], translations: { ...(liveCues.value[idx].translations ?? {}), ...o.translations } })
+    }
+  } else {
+    const f = files.value.find((x) => x.id === source)
+    if (!f) return
+    for (const o of outs) {
+      const c = f.cues.find((x) => x.id === o.id)
+      if (c && Object.keys(o.translations).length) { c.translations = { ...(c.translations ?? {}), ...o.translations } }
+    }
+  }
+}
+
+/** 對某軌讀已快取譯文並 merge（cue 就緒時呼：live seed 後 / file 載入後）。 */
+async function loadCachedForTrack(name: TrackName): Promise<void> {
+  const track = tracks[name]
+  if (track.translateTo === 'off') return
+  if (!useSettings().state.liveSubs.translateEnabled) return
+  const srcCur = usePlayer().source.current
+  const source = buildXlateSource(track.source, srcCur, useSettings().state.liveSubs.sourceLang)
+  if (!source) return
+  const outs = await readCuedTranslations(source, [track.translateTo]).catch(() => [])
+  if (outs.length === 0) return
+  if (track.source === 'live') {
+    liveCues.value = liveCues.value.map((c) => {
+      const hit = outs.find((o) => o.id === c.id)
+      return hit ? { ...c, translations: { ...(c.translations ?? {}), ...hit.translations } } : c
+    })
+  } else {
+    const f = files.value.find((x) => x.id === track.source)
+    if (f) f.cues = mergeCachedTranslations(f.cues, outs)
+  }
+}
+
 function enforceSecondaryDep(): void {
   tracks.secondary.source = clampSec(tracks.primary.source, tracks.secondary.source)
 }
@@ -210,6 +360,7 @@ function toggleCc(): void {
 }
 const ccActive = computed(() => tracks.primary.source !== 'off' || tracks.secondary.source !== 'off')
 function setDelay(track: TrackName, delaySec: number): void { tracks[track].delaySec = delaySec; recordCurrent() }
+function setTranslateTo(track: TrackName, lang: string): void { tracks[track].translateTo = lang; recordCurrent() }
 function addFile(name: string, cues: Cue[], path: string | null, manual: boolean): string {
   const id = `f${++fileCounter}`
   files.value.push({ id, name, cues, path, manual })
@@ -226,21 +377,6 @@ async function disable(): Promise<void> {
 
 /** 清掉殘留進度（provision 對話框關閉時呼叫，避免 dlText banner 殘留一閃）。 */
 function clearProgress(): void { progress.value = null }
-
-/** 子切片 1：啟動 loopback 擷取字幕（§4.7：sourceLang 必為 concrete，非自動）。 */
-async function startLoopbackCapture(deviceId: string | null): Promise<void> {
-  const s = useSettings().state
-  const { lang, prompt } = langToWhisper(s.liveSubs.sourceLang)
-  if (!lang) throw new Error('loopback 需指定明確語言（非自動）') // §4.7
-  await startLoopback(deviceId, s.liveSubs.model, lang, prompt ?? '', s.liveSubs.vad.threshold, s.liveSubs.vad.minSilenceMs)
-}
-async function stopLoopbackCapture(): Promise<void> {
-  await stopLoopback()
-  // 後端 shutdown 不發 reset 事件 → stop 必須前端自清，否則 overlay 凍住最後一行。
-  liveCues.value = []
-  liveInterim.value = null
-  noClock.value = false
-}
 
 /** Part B 還原：依 memory[key] 還原 manualFiles + 軌道；失效 manualFile 剔除並持久化。無記憶 → 不還原（N1）。 */
 async function restoreFromMemory(key: string, gen: number): Promise<void> {
@@ -270,8 +406,8 @@ async function restoreFromMemory(key: string, gen: number): Promise<void> {
     }
     // 2) 還原軌道（fileId 由 path 反查；'live' 受 master 控）
     const masterOn = useSettings().state.liveSubs.enabled
-    tracks.primary = { source: restoreTrackSource(entry.primary.source, files.value, masterOn), delaySec: entry.primary.delaySec }
-    tracks.secondary = { source: restoreTrackSource(entry.secondary.source, files.value, masterOn), delaySec: entry.secondary.delaySec }
+    tracks.primary = { source: restoreTrackSource(entry.primary.source, files.value, masterOn), delaySec: entry.primary.delaySec, translateTo: entry.primary.translateTo }
+    tracks.secondary = { source: restoreTrackSource(entry.secondary.source, files.value, masterOn), delaySec: entry.secondary.delaySec, translateTo: entry.secondary.translateTo }
     enforceSecondaryDep()
   } finally {
     restoreDepth--
@@ -311,14 +447,40 @@ async function onFileChanged(): Promise<void> {
     await restoreFromMemory(normKey(path), gen)
     if (gen !== fileGen) return
   }
+  // Part B 後：對已指向字幕檔且設了翻譯的軌，瞬載快取譯文
+  for (const n of ['primary', 'secondary'] as const) {
+    if (tracks[n].source !== 'live' && tracks[n].source !== 'off') void loadCachedForTrack(n)
+  }
   // 還原後顯式啟動 live（不靠 watch(liveNeeded) transition；前片已 live 時 source='live' 是 no-op、watcher 不會 fire）。
   if (liveNeeded.value) await startForCurrent()
 }
 
-const activeText = (track: TrackName, t: number): string =>
-  selectCueAt(resolveCues(tracks[track]), t - tracks[track].delaySec)?.sourceText ?? ''
+const activeText = (track: TrackName, t: number): string => {
+  const c = selectCueAt(resolveCues(tracks[track]), t - tracks[track].delaySec)
+  if (!c) return ''
+  const to = useSettings().state.liveSubs.translateEnabled ? tracks[track].translateTo : 'off'
+  return pickCueText(c, to)
+}
 const isTranscribing = (track: TrackName, t: number): boolean =>
   tracks[track].source === 'live' && t > frontierSec.value && !activeText(track, t)
+
+/** clock 模式排程 gate：非 loopback + 有播放來源 + 引擎就緒 + 該軌設了翻譯。純函式。 */
+export function shouldTranslateTrack(
+  track: { source: string; translateTo: string }, noClock: boolean, hasSource: boolean, engineReady: boolean,
+): boolean {
+  return !noClock && hasSource && engineReady && track.source !== 'off' && track.translateTo !== 'off'
+}
+
+/** 純函式：依播放狀態與 armed 狀態決定 CC 鈕三態。
+ *  playing=true → 'file'（控制片字幕）
+ *  idle + armed  → 'external'（外部辨識 toggle）
+ *  idle 未 armed → 'disabled'
+ */
+export function ccMode(playing: boolean, armed: boolean): 'file' | 'external' | 'disabled' {
+  if (playing) return 'file'
+  if (armed) return 'external'
+  return 'disabled'
+}
 
 export function useSubtitles() {
   ensureWired()
@@ -331,6 +493,7 @@ export function useSubtitles() {
     toggleCc,
     ccActive: readonly(ccActive),
     setDelay,
+    setTranslateTo,
     addFile,
     disable,
     onFileChanged,
@@ -341,7 +504,5 @@ export function useSubtitles() {
     noClock: readonly(noClock),
     liveCues: readonly(liveCues),
     liveInterim: readonly(liveInterim),
-    startLoopbackCapture,
-    stopLoopbackCapture,
   }
 }

@@ -1,4 +1,4 @@
-import { reactive, readonly } from 'vue'
+import { computed, reactive, readonly } from 'vue'
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
 import { open } from '@tauri-apps/plugin-dialog'
 import {
@@ -7,6 +7,7 @@ import {
   seekAbsolute, seekRelative,
   setVolume as mpvSetVolume, setMute,
   loadViaYtdl, setPause, onMpvEvent,
+  stop as mpvStop,
   type MpvState,
 } from '../mpv'
 import { resolveRemote, type ResolvedRemote } from './backend'
@@ -77,6 +78,11 @@ function setResolving(on: boolean): void { source.resolving = on }
 
 function logErr(label: string) {
   return (e: unknown) => console.error(`[player] ${label} failed`, e)
+}
+
+// 計算是否空閒：沒有活躍媒體檔案時為 true
+export function deriveIdle(path: string | null): boolean {
+  return path == null
 }
 
 const onState = (s: MpvState) => {
@@ -199,6 +205,12 @@ async function loadUrl(watchUrl: string): Promise<{ ok: boolean; reason?: string
 
 async function shutdown(): Promise<void> { await stopMpv() }
 
+// 卸載當前檔案：停止 mpv 播放、清除來源狀態
+async function closeMedia(): Promise<void> {
+  await mpvStop().catch(logErr('closeMedia'))
+  source.current = null
+}
+
 /** 同片換畫質：用新 itag 重載（不動 source.current → canonicalId 恆定，識別冪等成立）。 */
 async function reloadQualityFmt(quality: 'auto' | number): Promise<boolean> {
   const cur = source.current
@@ -211,10 +223,12 @@ async function reloadQualityFmt(quality: 'auto' | number): Promise<boolean> {
 async function setPauseTrue(): Promise<void> { await setPause(true).catch(logErr('setPauseTrue')) }
 
 export function usePlayer() {
+  const isIdle = computed(() => deriveIdle(state.path))
+
   return {
     state: readonly(state),
     source: readonly(source),
-    start, shutdown,
+    start, shutdown, closeMedia,
     togglePause, seekTo, seekToImmediate, seekBy, onSeek,
     setVolume, adjustVolume, toggleMute,
     toggleFullscreen, exitFullscreen,
@@ -222,5 +236,6 @@ export function usePlayer() {
     setResolving, onEndFile, onFileLoaded, onStartFile,
     reloadQualityFmt, setPauseTrue,
     beginQualitySwitch, endQualitySwitch,
+    isIdle,
   }
 }

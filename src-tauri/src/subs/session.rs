@@ -6,6 +6,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 
+/// 外部串流轉寫（capture CC）所需參數：由 start_external_transcription 設入 Manager。
+#[derive(Clone, Debug)]
+pub struct TranscribeParams {
+    pub model: String,
+    pub source_lang: String,
+    pub prompt: String,
+    pub vad_threshold: f64,
+    pub vad_min_silence_ms: i64,
+    pub target_langs: Vec<String>,
+    pub translate_model: String,
+}
+
 /// VAD 啟動參數（whisper-server 啟動旗標；改值需重啟 server）。
 #[derive(Clone, Debug)]
 pub struct VadParams {
@@ -53,7 +65,6 @@ pub struct SessionParams {
     pub overwrite_on_param_change: bool,
 }
 
-#[derive(Default)]
 pub struct Manager {
     counter: u64,
     server: Option<whisper::WhisperServer>,
@@ -67,6 +78,51 @@ pub struct Manager {
     data_dir: Option<PathBuf>,
     capture_stop: Option<std::sync::Arc<AtomicBool>>,
     capture_thread: Option<std::thread::JoinHandle<()>>,
+    transcribe_enabled: Arc<AtomicBool>,
+    transcribe_params: Arc<std::sync::Mutex<Option<TranscribeParams>>>,
+    // 錄製擷取：run_loop 串流寫 WAV + 累積定稿 cue；停止路徑（disarm/重 arm/shutdown）finalize。
+    record: Option<RecordState>,
+    // 翻譯 sidecar（lazy；ensure_translator 首次需要時起動）。
+    translator: Option<Arc<crate::subs::translate::local::LocalLlmTranslator>>,
+    loaded_translate_model: Option<String>,
+    // 譯文累加器（真相源）：key=(sidecar_path,target)；首次 touch 從磁碟 seed；
+    // seed+merge+write 全在此 std::sync::Mutex 臨界區內序列化 → 消 concurrent lost-update。
+    // upsert_translations 由 translate_cues 指令呼叫（非 run_loop；run() 無翻譯副作用）。
+    #[allow(clippy::type_complexity)]
+    translation_cache: Arc<std::sync::Mutex<std::collections::HashMap<(PathBuf, String), BTreeMap<i64, cache::XlateRec>>>>,
+}
+
+/// 錄製狀態：WAV 由 capture 執行緒串流寫（源取樣率，停止時自行 finalize）；此處只持
+/// 字幕定稿 cue 累積（run_loop append）+ 輸出路徑（停止時寫 SRT、回報已存檔）。
+pub(crate) struct RecordState {
+    pub cues: Arc<std::sync::Mutex<Vec<Cue>>>,
+    pub wav_path: PathBuf,
+    pub srt_path: PathBuf,
+}
+
+impl Default for Manager {
+    fn default() -> Self {
+        Self {
+            counter: 0,
+            server: None,
+            loaded_model: None,
+            loaded_vad: None,
+            ffmpeg: None,
+            http: None,
+            task: None,
+            seek_to: Arc::new(std::sync::Mutex::new(None)),
+            cancel: Arc::new(AtomicBool::new(false)),
+            data_dir: None,
+            capture_stop: None,
+            capture_thread: None,
+            transcribe_enabled: Arc::new(AtomicBool::new(false)),
+            transcribe_params: Arc::new(std::sync::Mutex::new(None)),
+            record: None,
+            translator: None,
+            loaded_translate_model: None,
+            translation_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        }
+    }
 }
 
 /// 刪除 data 內所有 track-*.wav / win-*.wav 暫存（best-effort）。
@@ -102,10 +158,15 @@ impl Manager {
     /// 完全停用：停任務 + 殺 server + 掃暫存。
     pub async fn shutdown(&mut self) {
         self.stop_task();
+        let _ = self.finalize_record(); // 收尾任何進行中的錄音（app 關閉/完全停止；無 emit）
         self.loaded_model = None;
         self.loaded_vad = None;
         if let Some(s) = self.server.take() {
             s.kill().await;
+        }
+        // app 關閉：明確殺 translator sidecar（kill_on_drop 在 ExitRequested 不可靠）。
+        if let Some(tr) = self.translator.take() {
+            tr.shutdown().await;
         }
         if let Some(d) = &self.data_dir {
             sweep_temp(d);
@@ -140,6 +201,57 @@ impl Manager {
     pub(crate) fn set_data_dir(&mut self, d: std::path::PathBuf) { self.data_dir = Some(d); }
     pub(crate) fn set_task(&mut self, h: tauri::async_runtime::JoinHandle<()>) { self.task = Some(h); }
     pub(crate) fn http_clone(&self) -> Option<reqwest::Client> { self.http.clone() }
+
+    // Transcribe flag + params accessors（arm/transcribe 拆分）
+    pub fn transcribe_flag(&self) -> Arc<AtomicBool> { self.transcribe_enabled.clone() }
+    pub fn params_handle(&self) -> Arc<std::sync::Mutex<Option<TranscribeParams>>> { self.transcribe_params.clone() }
+    pub fn set_transcribe(&self, on: bool) { self.transcribe_enabled.store(on, Ordering::SeqCst); }
+    pub fn set_transcribe_params(&self, p: TranscribeParams) { *self.transcribe_params.lock().unwrap() = Some(p); }
+
+    /// 翻譯器 getter（Task 7 run_loop 用）。
+    #[allow(dead_code)] // Task 7 calls this from run_loop
+    pub fn translator_clone(&self) -> Option<Arc<crate::subs::translate::local::LocalLlmTranslator>> {
+        self.translator.clone()
+    }
+
+    /// 併發安全的譯文落地：seed（首次）→ merge → 整份寫回，全在同一鎖臨界區。
+    /// 只做同步 fs（不跨 await），用 std::sync::Mutex。由 translate_cues 指令呼叫（非 run_loop）。
+    pub fn upsert_translations(
+        &self,
+        root: &std::path::Path,
+        source: &cache::XlateSource,
+        target: &str,
+        recs: Vec<cache::XlateRec>,
+    ) {
+        let path = cache::translation_sidecar_path(root, source, target);
+        let key = (path.clone(), target.to_string());
+        let mut guard = self.translation_cache.lock().unwrap();
+        let map = guard
+            .entry(key)
+            .or_insert_with(|| cache::read_translation_srt(&path)); // 首次 touch 從磁碟 seed
+        for r in recs {
+            let ms = (r.start_sec * 1000.0).round() as i64;
+            map.insert(ms, r);
+        }
+        let _ = cache::write_translation_srt(&path, map); // 整份 union 寫回（鎖內）
+    }
+
+    // 錄製 accessors（stream::start 設定、run_loop 寫入、停止路徑 finalize）
+    pub(crate) fn set_record(&mut self, state: RecordState) {
+        self.record = Some(state);
+    }
+    /// finalize 錄製：寫 SRT + 回 WAV 路徑供前端 emit。須先 stop_task（join capture 執行緒，
+    /// 屆時 WAV 已由該執行緒 finalize；沒錄到音它會自刪）。WAV 不存在 → 視為空、回 None。
+    pub(crate) fn finalize_record(&mut self) -> Option<PathBuf> {
+        let st = self.record.take()?;
+        let recorded = std::fs::metadata(&st.wav_path).map(|m| m.len() > 44).unwrap_or(false);
+        if !recorded { return None; } // capture 執行緒因 0 samples 已刪空檔
+        let cues = st.cues.lock().unwrap_or_else(|e| e.into_inner());
+        if !cues.is_empty() {
+            let _ = std::fs::write(&st.srt_path, cache::cues_to_srt(&cues)); // CC 開過才有字幕
+        }
+        Some(st.wav_path)
+    }
 }
 
 pub async fn start(
@@ -237,6 +349,43 @@ pub(crate) async fn ensure_server(
         old.kill().await; // 殺舊（鎖外）
     }
     Ok(port)
+}
+
+/// 確保翻譯 sidecar 就緒（key 相同才重用；不同則殺舊、起新）。鏡像 ensure_server。
+/// data = <root>/subs；llm 目錄從 data.parent()（root）下的 llm/（對齊 provision 下載位置）。
+pub async fn ensure_translator(
+    app: &AppHandle,
+    mgr: &Arc<tokio::sync::Mutex<Manager>>,
+    data: &std::path::Path,
+    downloading: &Arc<std::sync::Mutex<HashSet<String>>>,
+    translate_key: &str,
+) -> Result<Arc<crate::subs::translate::local::LocalLlmTranslator>, String> {
+    // fast path：已有且同一模型才重用
+    {
+        let m = mgr.lock().await;
+        if m.loaded_translate_model.as_deref() == Some(translate_key) {
+            if let Some(t) = m.translator.clone() {
+                return Ok(t);
+            }
+        }
+    }
+    // 模型不同或尚未載入：殺舊 sidecar（不同權重＝新程序；VRAM 無法共存）
+    let old = { mgr.lock().await.translator.take() };
+    if let Some(t) = old { t.shutdown().await; }
+    { mgr.lock().await.loaded_translate_model = None; }
+
+    let root = data.parent().unwrap_or(data);
+    let llm = download::llm_dir(root);
+    let hw = hwdetect::detect_hardware_blocking();
+    let backend = if hw.backend == "cuda" { hwdetect::Backend::Cuda } else { hwdetect::Backend::Cpu };
+    let (exe, gguf) = download::ensure_llm_assets(app, &llm, downloading, backend, translate_key, prog_emit(app.clone(), "llm")).await?;
+    let tr = Arc::new(crate::subs::translate::local::LocalLlmTranslator::new(&exe, &gguf).await?);
+    {
+        let mut m = mgr.lock().await;
+        m.translator = Some(tr.clone());
+        m.loaded_translate_model = Some(translate_key.to_string());
+    }
+    Ok(tr)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -531,6 +680,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn transcribe_params_default_target_langs_empty() {
+        let p = TranscribeParams {
+            model: "turbo".into(),
+            source_lang: "ja".into(),
+            prompt: String::new(),
+            vad_threshold: 0.5,
+            vad_min_silence_ms: 100,
+            target_langs: Vec::new(),
+            translate_model: "translate-4b".into(),
+        };
+        assert!(p.target_langs.is_empty());
+    }
+
+    #[test]
     fn vad_eq_equal_and_within_tolerance() {
         let a = VadParams { threshold: 0.50, min_silence_ms: 100, vad_enabled: true };
         let b = VadParams { threshold: 0.50, min_silence_ms: 100, vad_enabled: true };
@@ -586,5 +749,26 @@ mod tests {
         let on = VadParams { threshold: 0.5, min_silence_ms: 100, vad_enabled: true };
         let off = VadParams { threshold: 0.5, min_silence_ms: 100, vad_enabled: false };
         assert!(!vad_eq(&on, &off)); // ON↔OFF 必判不同 → 強制重啟 server
+    }
+
+    #[test]
+    fn upsert_translations_seeds_and_preserves() {
+        let dir = std::env::temp_dir().join(format!("lmpv-mgr-xlate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let src = cache::XlateSource::File { sub_path: "C:/subs/a.srt".into() };
+        // 先寫一條進 sidecar（模擬既有快取）
+        let path = cache::translation_sidecar_path(&dir, &src, "zh-Hant");
+        let mut seed = BTreeMap::new();
+        seed.insert(1000, cache::XlateRec { start_sec: 1.0, end_sec: 2.0, text: "舊".into() });
+        cache::write_translation_srt(&path, &seed).unwrap();
+        // upsert 新一條 → 應 seed 舊的 + 併新的、不清舊
+        let mgr = Manager::default();
+        mgr.upsert_translations(&dir, &src, "zh-Hant",
+            vec![cache::XlateRec { start_sec: 5.0, end_sec: 6.0, text: "新".into() }]);
+        let back = cache::read_translation_srt(&path);
+        assert_eq!(back.len(), 2);
+        assert_eq!(back[&1000].text, "舊"); // seed 保留
+        assert_eq!(back[&5000].text, "新");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

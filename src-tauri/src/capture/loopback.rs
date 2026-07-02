@@ -6,6 +6,9 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
+use std::path::Path;
+
+use crate::capture::source::AudioSource;
 
 pub const TARGET_RATE: u32 = 16000;
 /// 能量門檻（型別 f32 配 tail_has_speech；實機 probe 可調）。
@@ -64,6 +67,67 @@ pub fn tail_has_speech(frames: &[f32], tail_sec: f64, thresh: f32) -> bool {
     rms(&frames[frames.len() - n..]) >= thresh
 }
 
+/// 串流寫 16-bit PCM WAV（任意 rate/channels）：開檔寫 placeholder header → 每 chunk append →
+/// 停止時 finalize 補回 RIFF/data 大小。給長時間擷取（會議數小時）邊錄邊寫、不吃 RAM。
+/// 錄製走「源取樣率、未經 resample」的乾淨音訊（resample 是 per-packet 無狀態，會有邊界 click）。
+pub struct WavRecorder {
+    file: std::fs::File,
+    rate: u32,
+    channels: u16,
+    pub samples: u32, // 已寫入的取樣值數（frames×channels）；data_len = samples×2
+}
+
+fn write_wav_header(f: &mut std::fs::File, rate: u32, channels: u16, data_len: u32) -> std::io::Result<()> {
+    use std::io::Write;
+    let block_align = channels * 2; // 16-bit
+    let byte_rate = rate * block_align as u32;
+    f.write_all(b"RIFF")?;
+    f.write_all(&(36 + data_len).to_le_bytes())?;
+    f.write_all(b"WAVE")?;
+    f.write_all(b"fmt ")?;
+    f.write_all(&16u32.to_le_bytes())?;        // fmt chunk size（PCM）
+    f.write_all(&1u16.to_le_bytes())?;         // audio format = PCM
+    f.write_all(&channels.to_le_bytes())?;     // channels
+    f.write_all(&rate.to_le_bytes())?;         // sample rate
+    f.write_all(&byte_rate.to_le_bytes())?;    // byte rate
+    f.write_all(&block_align.to_le_bytes())?;  // block align
+    f.write_all(&16u16.to_le_bytes())?;        // bits per sample
+    f.write_all(b"data")?;
+    f.write_all(&data_len.to_le_bytes())?;
+    Ok(())
+}
+
+impl WavRecorder {
+    pub fn create(path: &Path, rate: u32, channels: u16) -> std::io::Result<Self> {
+        let mut file = std::fs::File::create(path)?;
+        write_wav_header(&mut file, rate, channels, 0)?; // placeholder；finalize 時補正確大小
+        Ok(Self { file, rate, channels, samples: 0 })
+    }
+
+    pub fn write_chunk(&mut self, chunk: &[f32]) -> std::io::Result<()> {
+        use std::io::Write;
+        let mut buf = Vec::with_capacity(chunk.len() * 2);
+        for &s in chunk {
+            buf.extend_from_slice(&((s.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes());
+        }
+        self.file.write_all(&buf)?;
+        self.samples = self.samples.saturating_add(chunk.len() as u32);
+        Ok(())
+    }
+
+    /// 補回 header 的 RIFF/data 大小並 flush（停止路徑呼叫）。
+    pub fn finalize(&mut self) -> std::io::Result<()> {
+        use std::io::{Seek, SeekFrom, Write};
+        let _ = (self.rate, self.channels); // header 已寫入，這裡只補大小
+        let data_len = self.samples.saturating_mul(2);
+        self.file.seek(SeekFrom::Start(4))?;
+        self.file.write_all(&(36 + data_len).to_le_bytes())?;
+        self.file.seek(SeekFrom::Start(40))?;
+        self.file.write_all(&data_len.to_le_bytes())?;
+        self.file.flush()
+    }
+}
+
 // ─────────────────────────── Task 8: 裝置列舉 ───────────────────────────
 
 #[derive(Clone, Serialize)]
@@ -77,23 +141,19 @@ pub struct AudioDevice {
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioSources {
-    pub devices: Vec<AudioDevice>,
+    pub processes: Vec<crate::capture::sessions::ProcessSource>,
+    pub input_devices: Vec<AudioDevice>,
 }
-// processes（單一程式 loopback）留後續 (1b)。
 
-/// 列出 render endpoints（wasapi 0.19）。必須在 spawn_blocking 內呼叫（COM）。
-pub fn list_sources() -> Result<AudioSources, String> {
-    // 在此 OS 執行緒初始化 COM (MTA)。重複呼叫回 S_FALSE（非失敗）→ 忽略即可。
+/// 列出 capture（麥克風/輸入）裝置（wasapi 0.19）。必須在 spawn_blocking 內呼叫（COM）。
+pub fn list_input_devices() -> Result<Vec<AudioDevice>, String> {
     let _ = wasapi::initialize_mta();
-
-    let default_id = wasapi::get_default_device(&wasapi::Direction::Render)
+    let default_id = wasapi::get_default_device(&wasapi::Direction::Capture)
         .ok()
         .and_then(|d| d.get_id().ok());
-
-    let collection = wasapi::DeviceCollection::new(&wasapi::Direction::Render)
-        .map_err(|e| format!("列舉 render 裝置失敗: {e}"))?;
+    let collection = wasapi::DeviceCollection::new(&wasapi::Direction::Capture)
+        .map_err(|e| format!("列舉 capture 裝置失敗: {e}"))?;
     let count = collection.get_nbr_devices().map_err(|e| e.to_string())?;
-
     let mut devices = Vec::new();
     for i in 0..count {
         let dev = match collection.get_device_at_index(i) {
@@ -108,7 +168,7 @@ pub fn list_sources() -> Result<AudioSources, String> {
         let is_default = default_id.as_deref() == Some(id.as_str());
         devices.push(AudioDevice { id, name, is_default });
     }
-    Ok(AudioSources { devices })
+    Ok(devices)
 }
 
 // ─────────────────────── Task 9: loopback 擷取執行緒 ───────────────────────
@@ -116,14 +176,14 @@ pub fn list_sources() -> Result<AudioSources, String> {
 /// loopback 擷取啟動回傳：(停止旗標, 執行緒 handle, 16k mono f32 chunk receiver)。
 type CaptureSession = (Arc<AtomicBool>, std::thread::JoinHandle<()>, Receiver<Vec<f32>>);
 
-/// 啟動裝置 loopback 擷取執行緒。device_id None = 預設 render 裝置。
+/// 啟動音源擷取執行緒。
 /// 回 (stop_flag, JoinHandle, Receiver<16k mono f32 chunks>)。
-pub fn start_capture(device_id: Option<String>) -> Result<CaptureSession, String> {
+pub fn start_capture(source: AudioSource, record: Option<std::path::PathBuf>) -> Result<CaptureSession, String> {
     let (tx, rx): (Sender<Vec<f32>>, Receiver<Vec<f32>>) = channel();
     let stop = Arc::new(AtomicBool::new(false));
     let stop2 = stop.clone();
     let handle = std::thread::spawn(move || {
-        if let Err(e) = capture_loop(device_id, tx, &stop2) {
+        if let Err(e) = capture_loop(source, tx, &stop2, record) {
             eprintln!("[loopback] capture loop ended: {e}");
         }
     });
@@ -145,41 +205,99 @@ fn find_render_device_by_id(id: &str) -> Result<wasapi::Device, String> {
     Err(format!("找不到 render 裝置 id={id}"))
 }
 
-fn capture_loop(
-    device_id: Option<String>,
-    tx: Sender<Vec<f32>>,
-    stop: &AtomicBool,
-) -> Result<(), String> {
-    // COM (MTA)：此執行緒專用，與 Manager / tokio 完全隔離。
-    let _ = wasapi::initialize_mta();
+/// 依 id 找 capture（輸入）裝置（在已 COM-init 的執行緒內呼叫）。
+fn find_capture_device_by_id(id: &str) -> Result<wasapi::Device, String> {
+    let collection = wasapi::DeviceCollection::new(&wasapi::Direction::Capture)
+        .map_err(|e| e.to_string())?;
+    let count = collection.get_nbr_devices().map_err(|e| e.to_string())?;
+    for i in 0..count {
+        if let Ok(dev) = collection.get_device_at_index(i) {
+            if dev.get_id().ok().as_deref() == Some(id) {
+                return Ok(dev);
+            }
+        }
+    }
+    Err(format!("找不到 capture 裝置 id={id}"))
+}
 
-    // 1. 取裝置（指定 id 或預設 render）。
-    let device = match &device_id {
-        Some(id) => find_render_device_by_id(id)?,
-        None => wasapi::get_default_device(&wasapi::Direction::Render).map_err(|e| e.to_string())?,
-    };
-
-    // 2. 開 IAudioClient，取 mix format（src_rate / channels）。
-    let mut audio_client = device.get_iaudioclient().map_err(|e| e.to_string())?;
-    let format = audio_client.get_mixformat().map_err(|e| e.to_string())?;
-    let channels = format.get_nchannels() as usize;
-    let src_rate = format.get_samplespersec();
-
-    // 3. 以 LOOPBACK 模式 initialize：render 裝置 + Direction::Capture + Shared
-    //    → wasapi 內部自動帶 AUDCLNT_STREAMFLAGS_LOOPBACK（見 api.rs initialize_client）。
-    let (_def_time, min_time) = audio_client.get_device_period().map_err(|e| e.to_string())?;
+/// System loopback 初始化：render 裝置 + Direction::Capture + EventsShared
+/// → wasapi 內部自動帶 AUDCLNT_STREAMFLAGS_LOOPBACK（見 api.rs initialize_client）。
+fn init_loopback(ac: &mut wasapi::AudioClient, fmt: &wasapi::WaveFormat) -> Result<(), String> {
+    let (_def_time, min_time) = ac.get_device_period().map_err(|e| e.to_string())?;
     let mode = wasapi::StreamMode::EventsShared {
         autoconvert: true,
         buffer_duration_hns: min_time,
     };
-    audio_client
-        .initialize_client(&format, &wasapi::Direction::Capture, &mode)
-        .map_err(|e| e.to_string())?;
+    ac.initialize_client(fmt, &wasapi::Direction::Capture, &mode)
+        .map_err(|e| e.to_string())
+}
+
+/// 依 source 取得 (IAudioClient, WaveFormat)。在已 COM-init 的執行緒內呼叫。
+fn open_client(source: &AudioSource) -> Result<(wasapi::AudioClient, wasapi::WaveFormat), String> {
+    match source {
+        AudioSource::System => {
+            let dev = wasapi::get_default_device(&wasapi::Direction::Render)
+                .map_err(|e| e.to_string())?;
+            let mut ac = dev.get_iaudioclient().map_err(|e| e.to_string())?;
+            let fmt = ac.get_mixformat().map_err(|e| e.to_string())?;
+            init_loopback(&mut ac, &fmt)?;
+            Ok((ac, fmt))
+        }
+        AudioSource::InputDevice { id } => {
+            let dev = find_capture_device_by_id(id)?;
+            let mut ac = dev.get_iaudioclient().map_err(|e| e.to_string())?;
+            let fmt = ac.get_mixformat().map_err(|e| e.to_string())?;
+            // 真·收音：Direction::Capture 一般模式（無 loopback flag）。
+            let (_def_time, min_time) = ac.get_device_period().map_err(|e| e.to_string())?;
+            let mode = wasapi::StreamMode::EventsShared {
+                autoconvert: true,
+                buffer_duration_hns: min_time,
+            };
+            ac.initialize_client(&fmt, &wasapi::Direction::Capture, &mode)
+                .map_err(|e| e.to_string())?;
+            Ok((ac, fmt))
+        }
+        AudioSource::Process { pid } => {
+            // 虛擬裝置不可 get_mixformat → 自帶固定格式 48k stereo f32。
+            let mut ac = wasapi::AudioClient::new_application_loopback_client(*pid, true)
+                .map_err(|e| e.to_string())?;
+            let fmt = wasapi::WaveFormat::new(32, 32, &wasapi::SampleType::Float, 48000, 2, None);
+            let mode = wasapi::StreamMode::EventsShared {
+                autoconvert: true,
+                buffer_duration_hns: 0,
+            };
+            ac.initialize_client(&fmt, &wasapi::Direction::Capture, &mode)
+                .map_err(|e| e.to_string())?;
+            Ok((ac, fmt))
+        }
+    }
+}
+
+fn capture_loop(
+    source: AudioSource,
+    tx: Sender<Vec<f32>>,
+    stop: &AtomicBool,
+    record: Option<std::path::PathBuf>,
+) -> Result<(), String> {
+    // COM (MTA)：此執行緒專用，與 Manager / tokio 完全隔離。
+    let _ = wasapi::initialize_mta();
+
+    // 1-3. 依 source 取得 (IAudioClient, WaveFormat)，內含裝置選取與 initialize_client。
+    let (audio_client, format) = open_client(&source)?;
+    let channels = format.get_nchannels() as usize;
+    let src_rate = format.get_samplespersec();
 
     // 4. event handle + capture client，start_stream。
     let h_event = audio_client.set_get_eventhandle().map_err(|e| e.to_string())?;
     let capture_client = audio_client.get_audiocaptureclient().map_err(|e| e.to_string())?;
     audio_client.start_stream().map_err(|e| e.to_string())?;
+
+    // 錄音：源取樣率 mono、未經 resample（resample 的 per-packet 邊界 click 會讓錄音破音/斷續）。
+    // 在此執行緒寫檔；本執行緒收 stop 旗標後正常退出（非 abort）→ 迴圈後可可靠 finalize。
+    let mut recorder = record.as_ref().and_then(|p| match WavRecorder::create(p, src_rate, 1) {
+        Ok(r) => Some(r),
+        Err(e) => { eprintln!("[loopback] 建立錄音 WAV 失敗：{e}"); None }
+    });
 
     // 5. 主迴圈：有上限 event 等待 + 每圈重查 stop（整合契約：≤~200ms 內必退）。
     let mut deque: VecDeque<u8> = VecDeque::new();
@@ -209,6 +327,9 @@ fn capture_loop(
             continue;
         }
         let mono = downmix(&interleaved, channels);
+        if let Some(r) = &mut recorder {        // 錄製：寫源取樣率 mono（resample 前的乾淨音訊）
+            let _ = r.write_chunk(&mono);
+        }
         let resampled = resample_to_16k(&mono, src_rate);
         // 非空才送；send 失敗＝consumer 已 drop Receiver → 立即退出（不阻塞、不碰 Manager）。
         if !resampled.is_empty() && tx.send(resampled).is_err() {
@@ -218,6 +339,15 @@ fn capture_loop(
 
     // 6. 收尾。
     let _ = audio_client.stop_stream();
+    // finalize 錄音：補 header 大小；完全沒錄到（0 samples）→ 刪空檔。
+    if let Some(mut r) = recorder {
+        let empty = r.samples == 0;
+        let _ = r.finalize();
+        if empty {
+            drop(r);
+            if let Some(p) = &record { let _ = std::fs::remove_file(p); }
+        }
+    }
     Ok(())
 }
 

@@ -18,6 +18,14 @@ function onToggle(v: boolean) { if (v) cap.enable(); else cap.disable() }
     <div v-else-if="cap.state.phase === 'checking'" class="note">檢查中…</div>
     <div v-else-if="cap.state.phase === 'error'" class="note err">下載失敗：{{ cap.state.error }} <button @click="cap.retry()">重試</button></div>
     <div v-else-if="settings.state.capture.enabled" class="note">已就緒——貼上 YouTube 網址即可播放。</div>
+
+    <div class="field">
+      <div class="lab">錄製擷取的音訊<small>擷取結束時把整段存成 WAV（16k 單聲道）到 recordings 資料夾。</small></div>
+      <GlassToggle
+        :model-value="settings.state.capture.recordAudio"
+        @update:model-value="(v) => (settings.state.capture.recordAudio = v)"
+      />
+    </div>
   </div>
 </template>
 <style scoped>
