@@ -14,15 +14,10 @@ const state = reactive<{
   from: From
   missing: MissingAsset[]
   totalMb: number
-  noModel: boolean
   error: string
-}>({ open: false, phase: 'ask', from: 'check', missing: [], totalMb: 0, noModel: false, error: '' })
+}>({ open: false, phase: 'ask', from: 'check', missing: [], totalMb: 0, error: '' })
 
-function enableNow(noModel: boolean): void {
-  const s = useSettings().state
-  s.liveSubs.enabled = true
-  if (noModel) s.liveSubs.model = 'turbo' // 無模型 → 選 turbo
-}
+function enableNow(): void { useSettings().state.liveSubs.enabled = true }
 
 function close(): void {
   state.open = false
@@ -32,7 +27,6 @@ function close(): void {
 function openAsk(sum: ProvisionSummary): void {
   state.missing = sum.missing
   state.totalMb = sum.totalMb
-  state.noModel = sum.noModel
   state.error = ''
   state.phase = 'ask'
   state.open = true
@@ -43,7 +37,7 @@ async function requestEnable(): Promise<void> {
   try {
     const sum = provisionSummary(await checkEngine())
     if (sum.missing.length === 0) {
-      enableNow(false)
+      enableNow()
       return
     }
     openAsk(sum)
@@ -61,8 +55,7 @@ async function confirm(): Promise<void> {
   state.phase = 'downloading'
   try {
     await provisionEngine()
-    const noModel = state.noModel
-    enableNow(noModel)
+    enableNow()
     close()
   } catch (e) {
     state.error = String(e)

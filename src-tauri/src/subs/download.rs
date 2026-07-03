@@ -185,6 +185,7 @@ pub fn translate_model_downloaded(llm_dir: &Path, key: &str) -> bool {
 pub fn llama_server_downloaded(llm_dir: &Path) -> bool { find_exe(llm_dir, "llama-server.exe").is_some() }
 
 /// `subs_dir` 內是否已有任一可用模型 .bin（small/medium/turbo/large-v3）。
+#[allow(dead_code)] // check_engine/auto-turbo 移除後改由前端 hasWhisperModel 判；保留供測試/未來
 pub fn any_model_downloaded(subs_dir: &Path) -> bool {
     ["small", "medium", "turbo", "large-v3"]
         .iter()
@@ -379,16 +380,14 @@ pub async fn ensure_model_file(
     }
 }
 
-/// 確保 llama-server.exe + GGUF 就緒（缺才下載），with InFlightGuard 去重。
-/// 不呼叫 ensure_model_file（whisper-寫死路徑），直接走 download_verify 新路徑。
-pub async fn ensure_llm_assets(
+/// 確保 llama-server.exe（+CUDA cudart）就緒（缺才下載），InFlightGuard 去重。回 exe 路徑。
+pub async fn ensure_llm_runtime(
     app: &AppHandle,
     llm_dir: &Path,
     downloading: &Arc<Mutex<HashSet<String>>>,
     backend: Backend,
-    translate_key: &str,
     mut on_progress: impl FnMut(u64, Option<u64>),
-) -> Result<(PathBuf, PathBuf), String> {
+) -> Result<PathBuf, String> {
     tokio::fs::create_dir_all(llm_dir).await.map_err(|e| e.to_string())?;
     if find_exe(llm_dir, "llama-server.exe").is_none() {
         let key = "llm-server".to_string();
@@ -407,14 +406,24 @@ pub async fn ensure_llm_assets(
             }
         }
     }
-    // CUDA 需要額外的 runtime DLL（binaries zip 不含）；解到同一 llm_dir 讓 llama-server.exe 能找到。
     if matches!(backend, Backend::Cuda) && !llm_dir.join("cudart64_12.dll").exists() {
         let cud = cudart_asset();
         let zip = download_verify(&cud, llm_dir, &mut on_progress).await?;
         unzip(&zip, llm_dir)?;
         let _ = tokio::fs::remove_file(&zip).await;
     }
-    let exe = find_exe(llm_dir, "llama-server.exe").ok_or("llama-server.exe 缺")?;
+    find_exe(llm_dir, "llama-server.exe").ok_or_else(|| "llama-server.exe 缺".to_string())
+}
+
+/// 確保翻譯 GGUF 就緒（缺才下載），InFlightGuard 去重。回 gguf 路徑。
+pub async fn ensure_llm_model(
+    app: &AppHandle,
+    llm_dir: &Path,
+    downloading: &Arc<Mutex<HashSet<String>>>,
+    translate_key: &str,
+    mut on_progress: impl FnMut(u64, Option<u64>),
+) -> Result<PathBuf, String> {
+    tokio::fs::create_dir_all(llm_dir).await.map_err(|e| e.to_string())?;
     let asset = translate_model_asset(translate_key);
     let gguf = llm_dir.join(asset.filename);
     if !gguf.exists() {
@@ -431,6 +440,20 @@ pub async fn ensure_llm_assets(
             }
         }
     }
+    Ok(gguf)
+}
+
+/// server+cudart+gguf 全備（ensure_translator/sidecar 啟動用）。
+pub async fn ensure_llm_assets(
+    app: &AppHandle,
+    llm_dir: &Path,
+    downloading: &Arc<Mutex<HashSet<String>>>,
+    backend: Backend,
+    translate_key: &str,
+    mut on_progress: impl FnMut(u64, Option<u64>),
+) -> Result<(PathBuf, PathBuf), String> {
+    let exe = ensure_llm_runtime(app, llm_dir, downloading, backend, &mut on_progress).await?;
+    let gguf = ensure_llm_model(app, llm_dir, downloading, translate_key, &mut on_progress).await?;
     Ok((exe, gguf))
 }
 

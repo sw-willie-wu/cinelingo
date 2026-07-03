@@ -1,4 +1,4 @@
-import { reactive } from 'vue'
+import { reactive, computed } from 'vue'
 import { listen } from '@tauri-apps/api/event'
 import { listModels, downloadModel, listTranslateModels } from './backend'
 import { useSettings } from './useSettings'
@@ -15,13 +15,20 @@ interface ModelDownloadEvent {
 }
 
 // 真實 whisper 模型 key（自動選模只對這些有效；LLM 引擎下載的 key 不算）。
-const WHISPER_MODEL_KEYS = new Set<string>(['small', 'medium', 'turbo', 'large-v3'])
+export const WHISPER_MODEL_KEYS = new Set<string>(['small', 'medium', 'turbo', 'large-v3'])
 const TRANSLATE_MODEL_KEYS = new Set<string>(['translate-4b', 'translate-12b'])
 
 // 模組層單例（跨設定 Modal 開/關存活；背景下載中關掉再開仍見進度）。
 const downloaded = reactive(new Set<string>())
 const downloading = reactive(new Map<string, { done: number; total: number | null }>())
 const errored = reactive(new Set<string>())
+
+/** downloaded 是否含任一真實 whisper 模型 key。純函式（供測 + hasWhisperModel）。 */
+export function computeHasWhisperModel(dl: Set<string>): boolean {
+  for (const k of WHISPER_MODEL_KEYS) if (dl.has(k)) return true
+  return false
+}
+const hasWhisperModel = computed(() => computeHasWhisperModel(downloaded))
 
 let wired: Promise<void> | null = null
 
@@ -96,5 +103,5 @@ async function download(key: string): Promise<void> {
 
 export function useModelDownloads() {
   ensureWired()
-  return { downloaded, downloading, errored, download }
+  return { downloaded, downloading, errored, download, hasWhisperModel }
 }

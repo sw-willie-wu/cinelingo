@@ -70,7 +70,8 @@ export function startExternalTranscription(
 export const listTranslateModels = () => invoke<ModelStatus[]>('list_translate_models')
 export const translateEngineReady = (key: string): Promise<boolean> => invoke('translate_engine_ready', { key })
 export const checkTranslateEngine = (key: string): Promise<{ kind: string; sizeMb: number }[]> => invoke('check_translate_engine', { key })
-export const provisionTranslateEngine = (key: string): Promise<void> => invoke('provision_translate_engine', { key })
+export const provisionTranslateRuntime = (): Promise<void> => invoke('provision_translate_runtime')
+export const downloadTranslateModel = (key: string): Promise<void> => invoke('download_translate_model', { key })
 export const stopExternalTranscription = () => invoke<void>('stop_external_transcription')
 
 export type XlateSource =

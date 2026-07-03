@@ -35,3 +35,11 @@ export function nextAutoSelectTranslate(
 ): TranslateModelKey | null {
   return downloaded.has(selected) ? null : justDownloaded
 }
+
+/** 翻譯列提示三態：off→選來源／未啟用→啟用／啟用但無模型→下載模型／可翻→空。純函式。 */
+export function transHintText(source: string, translateEnabled: boolean, modelDownloaded: boolean): string {
+  if (source === 'off') return '需先選字幕來源'
+  if (!translateEnabled) return '需在設定啟用翻譯'
+  if (!modelDownloaded) return '需在設定下載翻譯模型'
+  return ''
+}

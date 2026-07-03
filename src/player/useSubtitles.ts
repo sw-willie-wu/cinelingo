@@ -10,6 +10,7 @@ import { readTextFile, listSidecarSubs, loadSubMemory, saveSubMemory, startExter
 import { useAudioSource } from './useAudioSource'
 import { normKey, trackToStored, restoreTrackSource, coerceStoredEntry, type StoredEntry } from './subMemory'
 import { clampSecondaryToPrimary as clampSec, pickCcRestore, type CcSnapshot } from './ccRestore'
+import { useModelDownloads } from './useModelDownloads'
 
 interface Progress { phase: string; done: number; total: number | null; message: string }
 export type TrackName = 'primary' | 'secondary'
@@ -238,6 +239,13 @@ async function startForCurrent(): Promise<void> {
     vadThreshold: s.liveSubs.vad.threshold,
     vadMinSilenceMs: s.liveSubs.vad.minSilenceMs,
   }
+  // 安全網：無 whisper 模型時不得起 live（覆蓋外部音源與影片兩路徑）
+  if (liveBlockedByNoModel(liveNeeded.value, useModelDownloads().hasWhisperModel.value)) {
+    usePlayer().notify('請先在設定→即時字幕下載語音模型')
+    if (tracks.primary.source === 'live') tracks.primary.source = 'off'
+    if (tracks.secondary.source === 'live') tracks.secondary.source = 'off'
+    return
+  }
   // 外部音源模式：armed 且無影片（有影片時優先走影片路徑）
   if (useAudioSource().armed.value && !src) {
     if (!lang.value) {
@@ -463,6 +471,11 @@ const activeText = (track: TrackName, t: number): string => {
 }
 const isTranscribing = (track: TrackName, t: number): boolean =>
   tracks[track].source === 'live' && t > frontierSec.value && !activeText(track, t)
+
+/** 無 whisper 模型時不得起 live 轉寫（安全網：UI disable 外的程式路徑）。純函式。 */
+export function liveBlockedByNoModel(needLive: boolean, hasWhisperModel: boolean): boolean {
+  return needLive && !hasWhisperModel
+}
 
 /** clock 模式排程 gate：非 loopback + 有播放來源 + 引擎就緒 + 該軌設了翻譯。純函式。 */
 export function shouldTranslateTrack(

@@ -3,6 +3,7 @@ import { computed } from 'vue'
 import { useSubtitles, ccMode } from '../player/useSubtitles'
 import { usePlayer } from '../player/usePlayer'
 import { useAudioSource } from '../player/useAudioSource'
+import { useModelDownloads } from '../player/useModelDownloads'
 import PlayerIcon from './PlayerIcon.vue'
 
 const subs = useSubtitles()
@@ -10,10 +11,12 @@ const player = usePlayer()
 const audioSource = useAudioSource()
 
 const active = computed(() => subs.ccActive.value)
+const md = useModelDownloads()
 const mode = computed(() => ccMode(!player.isIdle.value, audioSource.armed.value))
+const disabled = computed(() => mode.value === 'disabled' || (mode.value === 'external' && !md.hasWhisperModel.value))
 
 function handleClick() {
-  if (mode.value !== 'disabled') subs.toggleCc()
+  if (!disabled.value) subs.toggleCc()
 }
 </script>
 <template>
@@ -21,7 +24,7 @@ function handleClick() {
     <button
       class="btn"
       :class="{ on: active }"
-      :disabled="mode === 'disabled'"
+      :disabled="disabled"
       aria-label="顯示/隱藏字幕"
       title="顯示/隱藏字幕"
       @click="handleClick()"

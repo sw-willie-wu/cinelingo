@@ -4,6 +4,7 @@ import { open as openDialog } from '@tauri-apps/plugin-dialog'
 import { useSubtitles } from '../../player/useSubtitles'
 import { useSettings } from '../../player/useSettings'
 import { useModelDownloads } from '../../player/useModelDownloads'
+import { transHintText } from '../../player/modelRows'
 import { readTextFile } from '../../player/backend'
 import { parseSubtitle } from '../../player/subtitles'
 import { LANGS } from '../../player/langs'
@@ -37,9 +38,8 @@ watch(() => settings.state.liveSubs.sourceLang, (src) => {
 })
 // 翻譯成常駐顯示；有字幕來源（live 或字幕檔）+ 翻譯已啟用+模型就緒時可選，否則顯示原因提示。
 const canTranslate = computed(() => cur.value.source !== 'off' && translateReady.value)
-const transHint = computed(() =>
-  cur.value.source === 'off' ? '需先選字幕來源' : '需在設定啟用翻譯'
-)
+const transHint = computed(() => transHintText(cur.value.source, settings.state.liveSubs.translateEnabled, md.downloaded.has(settings.state.liveSubs.translateModel)))
+const liveUsable = computed(() => masterOn.value && md.hasWhisperModel.value)
 
 const delayText = computed(() => {
   const v = cur.value.delaySec
@@ -79,11 +79,12 @@ async function addFile() {
     </li>
     <li
       class="src"
-      :class="{ sel: cur.source === 'live', disabled: !masterOn }"
-      @click="masterOn && subs.selectSource(props.track, 'live')"
+      :class="{ sel: cur.source === 'live', disabled: !liveUsable }"
+      @click="liveUsable && subs.selectSource(props.track, 'live')"
     >
       <span class="ic"><PlayerIcon name="captions-live" :size="18" /></span>即時字幕
       <span v-if="!masterOn" class="hint">需在設定開啟</span>
+      <span v-else-if="!md.hasWhisperModel.value" class="hint">需先下載語音模型</span>
       <GlassSelect
         v-else
         class="langsel"

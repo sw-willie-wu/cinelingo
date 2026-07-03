@@ -111,9 +111,6 @@ pub async fn check_engine(app: tauri::AppHandle) -> Result<EngineStatus, String>
         .await
         .map_err(|e| e.to_string())?;
     let mut missing = Vec::new();
-    if !download::any_model_downloaded(&subs_dir) {
-        missing.push(MissingAsset { kind: "model".into(), size_mb: download::SIZE_MB_TURBO });
-    }
     if !subs_dir.join(download::MODEL_VAD.filename).exists() {
         missing.push(MissingAsset { kind: "vad".into(), size_mb: download::SIZE_MB_VAD });
     }
@@ -126,18 +123,13 @@ pub async fn check_engine(app: tauri::AppHandle) -> Result<EngineStatus, String>
     Ok(EngineStatus { backend_kind: hw.backend, missing })
 }
 
-/// 下載所有缺的引擎件（不可取消）；無任一模型則抓 turbo。模型走 emit_progress=false（abort 不變式）。
+/// 下載所有缺的引擎 runtime（不可取消）。不下載模型（由使用者面板自行下載）。
 #[tauri::command]
-pub async fn provision_engine(app: tauri::AppHandle, state: tauri::State<'_, SubsState>) -> Result<(), String> {
+pub async fn provision_engine(app: tauri::AppHandle) -> Result<(), String> {
     use std::sync::atomic::AtomicBool;
     let data = crate::data_dir(&app)?.join("subs");
-    let cancel = AtomicBool::new(false); // 不可取消 → ck! 永不觸發
+    let cancel = AtomicBool::new(false);
     session::ensure_engine_assets(&app, &data, &cancel).await?;
-    if !download::any_model_downloaded(&data) {
-        download::ensure_model_file(&app, &data, &state.downloading, "turbo", false, session::prog_emit(app.clone(), "model"))
-            .await
-            .map(|_| ())?;
-    }
     Ok(())
 }
 
@@ -285,29 +277,35 @@ pub async fn check_translate_engine(app: tauri::AppHandle, key: String) -> Resul
     Ok(missing)
 }
 
+/// 裝翻譯執行套件（llama-server + CUDA cudart）；不下載模型。進度事件 key = "llm-runtime"。
 #[tauri::command]
-pub async fn provision_translate_engine(app: tauri::AppHandle, state: tauri::State<'_, SubsState>, key: String) -> Result<(), String> {
-    let data = crate::data_dir(&app)?;
-    let llm = download::llm_dir(&data);
+pub async fn provision_translate_runtime(app: tauri::AppHandle, state: tauri::State<'_, SubsState>) -> Result<(), String> {
+    let llm = download::llm_dir(&crate::data_dir(&app)?);
     let hw = tauri::async_runtime::spawn_blocking(hwdetect::detect_hardware_blocking).await.map_err(|e| e.to_string())?;
     let backend = if hw.backend == "cuda" { hwdetect::Backend::Cuda } else { hwdetect::Backend::Cpu };
-    let (app_p, key_p) = (app.clone(), key.clone());
+    let ap = app.clone();
     let on_prog = move |done: u64, total: Option<u64>| {
-        let _ = app_p.emit("model-download", ModelDownloadEvent {
-            key: key_p.clone(), phase: "downloading".into(), done, total, message: None,
-        });
+        let _ = ap.emit("model-download", ModelDownloadEvent {
+            key: "llm-runtime".into(), phase: "downloading".into(), done, total, message: None });
     };
-    match download::ensure_llm_assets(&app, &llm, &state.downloading, backend, &key, on_prog).await {
-        Ok(_) => {
-            let _ = app.emit("model-download", ModelDownloadEvent {
-                key: key.clone(), phase: "done".into(), done: 0, total: None, message: None });
-            Ok(())
-        }
-        Err(e) => {
-            let _ = app.emit("model-download", ModelDownloadEvent {
-                key: key.clone(), phase: "error".into(), done: 0, total: None, message: Some(e.clone()) });
-            Err(e)
-        }
+    match download::ensure_llm_runtime(&app, &llm, &state.downloading, backend, on_prog).await {
+        Ok(_) => { let _ = app.emit("model-download", ModelDownloadEvent { key: "llm-runtime".into(), phase: "done".into(), done: 0, total: None, message: None }); Ok(()) }
+        Err(e) => { let _ = app.emit("model-download", ModelDownloadEvent { key: "llm-runtime".into(), phase: "error".into(), done: 0, total: None, message: Some(e.clone()) }); Err(e) }
+    }
+}
+
+/// 只下載翻譯 GGUF 模型；進度事件 key = translate key（TranslatePanel 進度條已綁）。
+#[tauri::command]
+pub async fn download_translate_model(app: tauri::AppHandle, state: tauri::State<'_, SubsState>, key: String) -> Result<(), String> {
+    let llm = download::llm_dir(&crate::data_dir(&app)?);
+    let (ap, kp) = (app.clone(), key.clone());
+    let on_prog = move |done: u64, total: Option<u64>| {
+        let _ = ap.emit("model-download", ModelDownloadEvent {
+            key: kp.clone(), phase: "downloading".into(), done, total, message: None });
+    };
+    match download::ensure_llm_model(&app, &llm, &state.downloading, &key, on_prog).await {
+        Ok(_) => { let _ = app.emit("model-download", ModelDownloadEvent { key: key.clone(), phase: "done".into(), done: 0, total: None, message: None }); Ok(()) }
+        Err(e) => { let _ = app.emit("model-download", ModelDownloadEvent { key: key.clone(), phase: "error".into(), done: 0, total: None, message: Some(e.clone()) }); Err(e) }
     }
 }
 

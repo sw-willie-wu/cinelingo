@@ -5,7 +5,7 @@ import { useModelDownloads } from '../../player/useModelDownloads'
 import { useTranslateProvision } from '../../player/useTranslateProvision'
 import { rowState } from '../../player/modelRows'
 import { LANGS } from '../../player/langs'
-import { provisionTranslateEngine } from '../../player/backend'
+import { downloadTranslateModel } from '../../player/backend'
 import GlassSelect from '../GlassSelect.vue'
 import GlassToggle from '../GlassToggle.vue'
 
@@ -40,7 +40,7 @@ function transBarWidth(key: TransKey): string {
 async function downloadTrans(key: TransKey) {
   if (md.downloaded.has(key) || md.downloading.get(key)) return
   md.downloading.set(key, { done: 0, total: null })
-  try { await provisionTranslateEngine(key) } catch { md.downloading.delete(key) }
+  try { await downloadTranslateModel(key) } catch { md.downloading.delete(key) }
 }
 function onMaster(on: boolean) {
   if (on) void prov.requestEnable()
