@@ -1,8 +1,5 @@
 <p align="center">
-  <img src="src/assets/cinelingo-logo.svg" width="112" alt="Cinelingo logo">
-</p>
-<p align="center">
-  <img src="src/assets/cinelingo-wordmark.png" width="260" alt="Cinelingo">
+  <img src="src/assets/cinelingo-wordmark.png" width="300" alt="Cinelingo">
 </p>
 
 <p align="center">
