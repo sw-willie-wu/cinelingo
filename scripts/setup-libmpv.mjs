@@ -69,8 +69,10 @@ async function main() {
     return
   }
 
-  const sevenZip = find7z()
-  if (!sevenZip) {
+  // Raw-DLL components (no member) need no 7-Zip; only archives do.
+  const needs7z = needWork.some((c) => c.member)
+  const sevenZip = needs7z ? find7z() : null
+  if (needs7z && !sevenZip) {
     console.error('[setup-libmpv] 7-Zip not found. Install it (https://www.7-zip.org/ or `winget install 7zip.7zip`), then re-run `npm run setup-libmpv`.')
     process.exit(1)
   }
@@ -79,17 +81,20 @@ async function main() {
   try {
     for (const c of needWork) {
       console.log(`[setup-libmpv] provisioning ${c.name} …`)
-      const archivePath = join(work, basename(c.url))
-      await download(c.url, archivePath)
+      const fetched = join(work, basename(c.url))
+      await download(c.url, fetched)
 
-      const archiveHash = sha256(archivePath)
-      if (archiveHash !== c.archiveSha256) {
-        throw new Error(`archive SHA256 mismatch for ${c.name}\n  expected ${c.archiveSha256}\n  got      ${archiveHash}`)
+      let extracted = fetched // raw DLL: the download itself is the file
+      if (c.member) {
+        const archiveHash = sha256(fetched)
+        if (archiveHash !== c.archiveSha256) {
+          throw new Error(`archive SHA256 mismatch for ${c.name}\n  expected ${c.archiveSha256}\n  got      ${archiveHash}`)
+        }
+
+        const outDir = join(work, `${c.name}.out`)
+        mkdirSync(outDir, { recursive: true })
+        extracted = extractMember(sevenZip, fetched, c.member, outDir)
       }
-
-      const outDir = join(work, `${c.name}.out`)
-      mkdirSync(outDir, { recursive: true })
-      const extracted = extractMember(sevenZip, archivePath, c.member, outDir)
 
       const dllHash = sha256(extracted)
       if (dllHash !== c.dllSha256) {

@@ -9,7 +9,8 @@
 // ourselves, pinned to an exact version + SHA256, so the verified no-curl binary
 // is reproducible from scratch and can never be clobbered by `setup-lib`.
 //
-// To bump a version: update url/archiveSha256, download + extract the member,
+// Components without archiveSha256/member are raw DLL downloads (only dllSha256
+// is checked). To bump a version: update url/archiveSha256, download + extract the member,
 // recompute its sha256, and confirm it is still a no-curl build before pinning.
 
 // Path to src-tauri/lib, relative to the scripts/ directory.
@@ -17,11 +18,14 @@ export const LIB_DIR = ['..', 'src-tauri', 'lib']
 
 export const LIBMPV_COMPONENTS = [
   {
-    // mpv 0.41.0-744-g304426c39 — shinchiro mpv-winbuild-cmake, no-curl.
+    // mpv 0.41.0-744-g304426c39 — shinchiro mpv-winbuild-cmake 20260610, no-curl.
+    // shinchiro keeps only recent daily builds (the original 20260610 .7z now
+    // 404s), so the verified DLL is re-hosted as a raw asset on our own repo's
+    // deps-libmpv-20260610 release. No archive/member: downloaded as-is.
+    // Original: shinchiro/mpv-winbuild-cmake 20260610 mpv-dev-x86_64-20260610-git-304426c.7z
+    //   (archive sha256 8cbb25ea784f01afbb3f904217cab1317430a8bcfd5680fd827a866367f71cc9)
     name: 'libmpv-2.dll',
-    url: 'https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/20260610/mpv-dev-x86_64-20260610-git-304426c.7z',
-    archiveSha256: '8cbb25ea784f01afbb3f904217cab1317430a8bcfd5680fd827a866367f71cc9',
-    member: 'libmpv-2.dll',
+    url: 'https://github.com/sw-willie-wu/cinelingo/releases/download/deps-libmpv-20260610/libmpv-2.dll',
     dllSha256: '5c876d79e070529128331591b48f87846fb30557f19c11280df9c6ee9b6dbafa',
   },
   {
