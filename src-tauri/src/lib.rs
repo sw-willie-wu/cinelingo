@@ -67,6 +67,8 @@ pub fn run() {
             subs::provision_engine,
             subs::read_text_file,
             subs::sidecar::list_sidecar_subs,
+            subs::ytdlp_update::check_ytdlp_update,
+            subs::ytdlp_update::update_ytdlp,
             subs::check_ytdlp,
             subs::provision_ytdlp,
             subs::resolve_remote,

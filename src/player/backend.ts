@@ -36,6 +36,9 @@ export interface ResolvedRemote {
   videos: VideoFormat[]
 }
 export const checkYtdlp = () => invoke<boolean>('check_ytdlp')
+export interface YtdlpUpdateInfo { local: string; latest: string; outdated: boolean }
+export const checkYtdlpUpdate = () => invoke<YtdlpUpdateInfo>('check_ytdlp_update')
+export const updateYtdlp = () => invoke<string>('update_ytdlp')
 export const provisionYtdlp = () => invoke<void>('provision_ytdlp')
 export const resolveRemote = (url: string) => invoke<ResolvedRemote>('resolve_remote', { url })
 

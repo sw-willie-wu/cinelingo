@@ -20,9 +20,11 @@ import SubtitleOverlay from './components/SubtitleOverlay.vue'
 import SettingsModal from './components/SettingsModal.vue'
 import EngineProvisionDialog from './components/EngineProvisionDialog.vue'
 import TranslateProvisionDialog from './components/TranslateProvisionDialog.vue'
+import YtdlpUpdateDialog from './components/YtdlpUpdateDialog.vue'
 import { useSettings } from './player/useSettings'
 import { useEngineProvision } from './player/useEngineProvision'
 import { useTranslateProvision } from './player/useTranslateProvision'
+import { useYtdlpUpdate } from './player/useYtdlpUpdate'
 import { setVideoBlur } from './mpv'
 import { usePasteUrl } from './player/usePasteUrl'
 import { useAudioSource } from './player/useAudioSource'
@@ -83,6 +85,7 @@ onMounted(async () => {
   await windowControls.start()
   void useEngineProvision().verifyOnStartup()
   void useTranslateProvision().verifyTranslateOnStartup()
+  void useYtdlpUpdate().checkOnStartup()
   const win = getCurrentWebviewWindow()
 
   unlistenDrop = await win.onDragDropEvent(async (ev) => {
@@ -189,6 +192,7 @@ function onOverlayPointerUp() { dragOrigin = null }
       <SettingsModal />
       <EngineProvisionDialog />
       <TranslateProvisionDialog />
+      <YtdlpUpdateDialog />
     </template>
     <FloatingCaptions v-else />
   </div>

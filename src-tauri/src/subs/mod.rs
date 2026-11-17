@@ -14,6 +14,7 @@ pub mod hallucination;
 pub mod stream;
 pub mod translate;
 pub mod silero;
+pub mod ytdlp_update;
 
 use serde::Serialize;
 use std::collections::HashSet;

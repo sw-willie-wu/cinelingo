@@ -305,6 +305,14 @@ async fn ytdlp_get_url(yt_dlp: &Path, url: &str, fmt: &str) -> Option<String> {
 
 const RESOLVE_MAX_ATTEMPTS: usize = 3;
 
+/// 探測可達性用的直連 URL：muxed > audio-only > 最高畫質 video-only。None＝無任何可播來源。
+/// （yt-dlp 2026-10 起 YouTube 不再給 muxed；播放交 mpv ytdl 合併 DASH，故 muxed 非必需。）
+pub fn probe_target(p: &Picked) -> Option<&str> {
+    p.playback_url.as_deref()
+        .or(p.audio_url.as_deref())
+        .or_else(|| p.videos.first().map(|v| v.url.as_str()).filter(|s| !s.is_empty()))
+}
+
 /// range-GET 探測 playback_url 是否可達（帶 pick_resolved 的 headers，含 UA）。
 /// 200/206（success）→ true；403/其他狀態/網路錯 → false。保留 reqwest 預設 follow-redirect。
 async fn probe_playback_url(http: &reqwest::Client, url: &str, headers: &BTreeMap<String, String>) -> bool {
@@ -326,12 +334,11 @@ pub async fn resolve_remote(yt_dlp: &Path, url: &str) -> Result<Picked, String> 
         if p.is_live {
             return Ok(p);
         }
-        let pb = p
-            .playback_url
-            .clone()
-            .expect("resolve_once 回 Ok 且非 live 時 playback_url 必為 Some");
+        let target = probe_target(&p)
+            .expect("resolve_once 回 Ok 且非 live 時必有可播來源")
+            .to_string();
         let ok = match &http {
-            Some(c) => probe_playback_url(c, &pb, &p.http_headers).await,
+            Some(c) => probe_playback_url(c, &target, &p.http_headers).await,
             None => true,
         };
         if ok {
@@ -360,13 +367,14 @@ async fn resolve_once(yt_dlp: &Path, url: &str) -> Result<Picked, String> {
     // (those stay whatever pick_resolved derived from the JSON formats). Benign for YouTube
     // (formats share the client User-Agent), but a `-g`-only URL could 403 if headers mismatch.
     // When Phase 2 wires per-window decode, capture the chosen format's headers here.
-    if p.playback_url.is_none() {
+    // 有 DASH video-only 軌時不補 muxed：新版 yt-dlp 對 YouTube 已無 muxed，`-f best -g` 必敗、白耗一次 spawn。
+    if p.playback_url.is_none() && p.videos.is_empty() {
         p.playback_url = ytdlp_get_url(yt_dlp, url, "best").await;
     }
     if p.audio_url.is_none() {
         p.audio_url = ytdlp_get_url(yt_dlp, url, "bestaudio").await;
     }
-    if p.playback_url.is_none() {
+    if probe_target(&p).is_none() {
         return Err("無可用影音直連 URL".into());
     }
     Ok(p)
@@ -522,6 +530,41 @@ mod tests {
         assert_eq!(p.audio_url, None);
         assert_eq!(p.playback_url, None);
         assert!(p.title.is_none()); // json 無 title → None
+    }
+
+    /// 2026-10 起 yt-dlp 對 YouTube 不再給 muxed（itag 18）：只有 video-only + audio-only https。
+    /// 仍可播（mpv ytdl 合併）→ 探測目標退回 audio，再退 video；全無才算不可播。
+    #[test]
+    fn split_only_formats_still_playable() {
+        let j = json!({
+            "duration": 213.0,
+            "formats": [
+                {"vcodec":"none","acodec":"opus","protocol":"https","url":"A1","tbr":130.0},
+                {"format_id":"137","vcodec":"avc1.640028","acodec":"none","protocol":"https","url":"V1080","height":1080,"tbr":3000.0}
+            ]
+        });
+        let p = pick_resolved(&j);
+        assert_eq!(p.playback_url, None);
+        assert_eq!(probe_target(&p), Some("A1"));
+
+        let mut video_only = p.clone();
+        video_only.audio_url = None;
+        assert_eq!(probe_target(&video_only), Some("V1080"));
+
+        let mut nothing = video_only.clone();
+        nothing.videos.clear();
+        assert_eq!(probe_target(&nothing), None);
+    }
+
+    #[test]
+    fn probe_target_prefers_muxed() {
+        let j = json!({
+            "formats": [
+                {"vcodec":"none","acodec":"opus","protocol":"https","url":"A1","tbr":130.0},
+                {"vcodec":"avc1","acodec":"mp4a","protocol":"https","url":"M1","tbr":700.0}
+            ]
+        });
+        assert_eq!(probe_target(&pick_resolved(&j)), Some("M1"));
     }
 
     #[test]
